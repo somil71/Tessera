@@ -107,9 +107,21 @@ def model_contract(path, tile_size):
                 or attrs.get("group", 1) != 1
             ):
                 raise ValueError(f"node {index} Conv is not a supported pointwise convolution")
-        elif node.op_type in {"Relu", "Identity"}:
+        elif node.op_type in {"Relu", "Identity", "Sigmoid"}:
+            if len(node.input) != 1 or len(node.output) != 1 or attrs:
+                raise ValueError(f"node {index} has unsupported pointwise attributes or arity")
             continue
-        elif node.op_type in {"Add", "Sub"}:
+        elif node.op_type == "BatchNormalization":
+            if (len(node.input) != 5 or len(node.output) != 1
+                or any(name not in initializers for name in node.input[1:])
+                or any(len(initializers[name].dims) != 1 for name in node.input[1:])
+                or len({initializers[name].dims[0] for name in node.input[1:]}) != 1
+                or attrs.get("training_mode", 0) != 0
+                or not set(attrs).issubset({"epsilon", "momentum", "training_mode"})):
+                raise ValueError(f"node {index} BatchNormalization is not supported inference mode")
+        elif node.op_type in {"Add", "Sub", "Mul"}:
+            if len(node.input) != 2 or len(node.output) != 1 or attrs:
+                raise ValueError(f"node {index} has unsupported pointwise attributes or arity")
             for name in node.input:
                 if name in initializers:
                     dims = list(initializers[name].dims)

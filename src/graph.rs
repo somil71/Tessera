@@ -22,7 +22,7 @@ pub fn analyze(graph: &GraphProto, image_size: Option<(usize, usize)>) -> Result
 
     for input in &graph.input {
         add_producer(&mut producers, &input.name, "graph input")?;
-        shapes.insert(input.name.clone(), declared_shape(input, image_size));
+        shapes.insert(input.name.clone(), declared_shape(input, image_size, true));
         element_sizes.insert(
             input.name.clone(),
             onnx_element_size(input.type_.as_ref().map(|ty| ty.tensor_type().elem_type)),
@@ -107,7 +107,7 @@ pub fn analyze(graph: &GraphProto, image_size: Option<(usize, usize)>) -> Result
         }
         if let (Some(inferred), Some(declared)) = (
             shapes.get(&output.name).and_then(Option::as_ref),
-            declared_shape(output, image_size),
+            declared_shape(output, image_size, false),
         ) && *inferred != declared
         {
             return Err(format!(
@@ -270,16 +270,29 @@ fn positive_dims(dims: &[i64]) -> Option<Shape> {
     dims.iter().map(|dim| usize::try_from(*dim).ok()).collect()
 }
 
-fn declared_shape(input: &ValueInfoProto, image_size: Option<(usize, usize)>) -> Option<Shape> {
+fn declared_shape(
+    input: &ValueInfoProto,
+    image_size: Option<(usize, usize)>,
+    graph_input: bool,
+) -> Option<Shape> {
     let dims = &input.type_.as_ref()?.tensor_type().shape.as_ref()?.dim;
     dims.iter()
-        .map(|dim| {
+        .enumerate()
+        .map(|(index, dim)| {
             if dim.has_dim_value() {
                 usize::try_from(dim.dim_value()).ok()
             } else {
                 match (dim.dim_param(), image_size) {
                     ("height", Some((height, _))) => Some(height),
                     ("width", Some((_, width))) => Some(width),
+                    (_, Some((height, width))) if graph_input && dims.len() == 4 => {
+                        match index {
+                            0 => Some(1),
+                            2 => Some(height),
+                            3 => Some(width),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 }
             }
@@ -406,8 +419,10 @@ fn infer_shape(
             )
         }
         "MaxPool" => spatial_shape(node, input(0)?, *input(0)?.get(1)?, false),
-        "Relu" | "Softmax" => input(0).cloned(),
-        "Add" | "Sub" => broadcast(input(0)?, input(1)?),
+        "Relu" | "Identity" | "Sigmoid" | "Softmax" | "BatchNormalization" => {
+            input(0).cloned()
+        }
+        "Add" | "Sub" | "Mul" => broadcast(input(0)?, input(1)?),
         "ReduceMean" => {
             if attr(node, "keepdims").is_some_and(|value| value.i != 1) {
                 return None;

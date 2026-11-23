@@ -125,7 +125,7 @@ print("no feasible plan: reported without publishing output")
 
 unsupported_model = OUT / "unsupported_sigmoid.onnx"
 unsupported = onnx.load(ROOT / "models" / "pointwise_dev.onnx")
-unsupported.graph.node[1].op_type = "Sigmoid"
+unsupported.graph.node[1].op_type = "Tanh"
 onnx.checker.check_model(unsupported)
 onnx.save(unsupported, unsupported_model)
 unsupported_output = OUT / "unsupported_scores.tif"
@@ -139,5 +139,5 @@ assert rejected.returncode != 0 and not unsupported_output.exists()
 unsupported_failure = json.loads(
     unsupported_output.with_suffix(".plan.failure.json").read_text()
 )
-assert "first unsupported node 1 (Sigmoid)" in unsupported_failure["error"]
+assert "first unsupported node 1 (Tanh)" in unsupported_failure["error"]
 print("unsupported operator: identified before inference")

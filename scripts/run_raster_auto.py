@@ -50,7 +50,8 @@ def arguments():
 
 
 def model_family(model_path, model):
-    supported_ops = {"Conv", "ConvTranspose", "Relu", "Identity", "Add", "Sub",
+    supported_ops = {"Conv", "ConvTranspose", "Relu", "Identity", "Sigmoid",
+                     "BatchNormalization", "Add", "Sub", "Mul",
                      "MaxPool", "ReduceMean", "Shape", "Reshape", "Transpose",
                      "MatMul", "Softmax"}
     for index, node in enumerate(model.graph.node):
