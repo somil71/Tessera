@@ -46,6 +46,15 @@ def arguments():
 
 
 def model_family(model_path, model):
+    supported_ops = {"Conv", "ConvTranspose", "Relu", "Identity", "Add", "Sub",
+                     "MaxPool", "ReduceMean", "Shape", "Reshape", "Transpose",
+                     "MatMul", "Softmax"}
+    for index, node in enumerate(model.graph.node):
+        if node.op_type not in supported_ops:
+            raise ValueError(
+                f"first unsupported node {index} ({node.op_type}): "
+                "operator has no validated raster schedule"
+            )
     try:
         channels, scores = model_contract(model_path, 16)
         return "pointwise", channels, scores, None

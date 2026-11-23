@@ -8,6 +8,7 @@ import subprocess
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 import numpy as np
+import onnx
 import onnxruntime as ort
 import rasterio
 from rasterio.transform import from_origin
@@ -62,6 +63,53 @@ for tile_size, order, scale, offset in (
     print(f"U-Net tile {tile_size}: max_abs={max_abs:.3g}, shapes={len(report['worker_shapes'])}")
 
 print("exact U-Net raster tiling passed")
+
+# A supported user model need not use the development fixture's tensor names.
+renamed_model = OUT / "renamed_unet.onnx"
+renamed = onnx.load(MODEL)
+names = {value.name for value in renamed.graph.input}
+names.update(value.name for value in renamed.graph.output)
+names.update(value.name for value in renamed.graph.initializer)
+names.update(name for node in renamed.graph.node for name in (*node.input, *node.output) if name)
+mapping = {name: f"user_tensor_{index}" for index, name in enumerate(sorted(names))}
+for value in (*renamed.graph.input, *renamed.graph.output, *renamed.graph.value_info):
+    if value.name in mapping:
+        value.name = mapping[value.name]
+for value in renamed.graph.initializer:
+    value.name = mapping[value.name]
+for node in renamed.graph.node:
+    for index, name in enumerate(node.input):
+        if name in mapping:
+            node.input[index] = mapping[name]
+    for index, name in enumerate(node.output):
+        if name in mapping:
+            node.output[index] = mapping[name]
+onnx.checker.check_model(renamed)
+onnx.save(renamed, renamed_model)
+renamed_session = ort.InferenceSession(renamed_model, providers=["CPUExecutionProvider"])
+renamed_input = renamed_session.get_inputs()[0].name
+renamed_reference = renamed_session.run(None, {renamed_input: IMAGE[np.newaxis]})[0][0]
+renamed_output = OUT / "renamed_scores.tif"
+result = subprocess.run([PYTHON, RUNNER, "--model", renamed_model, "--input", SOURCE,
+                         "--output", renamed_output, "--tile-size", "16",
+                         "--memory-limit-mib", "128", "--overwrite"],
+                        capture_output=True, text=True)
+assert result.returncode == 0, result.stderr
+with rasterio.open(renamed_output) as raster:
+    assert np.array_equal(raster.read(), renamed_reference)
+print("renamed U-Net tensors: matched whole-image reference")
+auto_output = OUT / "renamed_auto_scores.tif"
+result = subprocess.run([PYTHON, ROOT / "scripts" / "run_raster_auto.py",
+                         "--model", renamed_model, "--input", SOURCE,
+                         "--output", auto_output, "--memory-limit-mib", "128",
+                         "--max-tile-size", "32", "--overwrite"],
+                        capture_output=True, text=True)
+assert result.returncode == 0, result.stderr
+with rasterio.open(auto_output) as raster:
+    assert np.array_equal(raster.read(), renamed_reference)
+auto_report = json.loads(auto_output.with_suffix(".report.json").read_text())
+assert auto_report["strategy"] == "auto-local_unet"
+print("renamed U-Net: automatic schedule matched whole-image reference")
 
 bad_source = OUT / "odd_width.tif"
 with rasterio.open(bad_source, "w", driver="GTiff", width=53, height=38,

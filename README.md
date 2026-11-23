@@ -64,7 +64,7 @@ For the frozen U-Net topology and an even-size raster, run the fixed exact spati
 .\.venv\Scripts\python.exe scripts\run_raster_unet.py --model models\evaluation\unet_dev.onnx --input data\input.tif --output runs\unet_scores.tif --tile-size 256
 ```
 
-This path validates the fixture topology, aligns tiles to the pool stride, reads a four-pixel halo, and clips halo windows at real image edges. It does not choose tile size or cut automatically.
+This path validates the supported topology without depending on the development fixture's tensor names, aligns tiles to the pool stride, reads a four-pixel halo, and clips halo windows at real image edges. It does not choose tile size or cut automatically.
 
 For the supported global-mean pattern, stream the reduction pass and execute the transformed pointwise graph under one job-wide cap:
 

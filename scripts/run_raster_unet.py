@@ -66,14 +66,27 @@ def validate_model(path):
     if ops != ["Conv", "Relu", "MaxPool", "Conv", "Relu", "ConvTranspose", "Add", "Conv"]:
         raise ValueError("unsupported U-Net topology")
     nodes = graph.node
-    expected_edges = [
-        ("image", "enc"), ("enc", "skip"), ("skip", "pooled"),
-        ("pooled", "bottleneck"), ("bottleneck", "deep"),
-        ("deep", "up"), ("up", "merged"), ("merged", "logits"),
+    if any(len(node.output) != 1 for node in nodes):
+        raise ValueError("U-Net nodes must each have one output")
+    values = [node.output[0] for node in nodes]
+    expected_inputs = [
+        [inputs[0].name], [values[0]], [values[1]], [values[2]],
+        [values[3]], [values[4]], [values[5], values[1]], [values[6]],
     ]
-    if [(node.input[0], node.output[0]) for node in nodes] != expected_edges:
-        raise ValueError("unsupported U-Net wiring")
-    if list(nodes[6].input) != ["up", "skip"]:
+    for index, node in enumerate(nodes):
+        if list(node.input[:len(expected_inputs[index])]) != expected_inputs[index]:
+            raise ValueError(f"unsupported U-Net wiring at node {index}")
+        extras = list(node.input[len(expected_inputs[index]):])
+        if index in (0, 3, 5, 7):
+            if not extras or len(extras) > 2 or any(name not in initializers for name in extras):
+                raise ValueError(f"unsupported U-Net weights at node {index}")
+        elif extras:
+            raise ValueError(f"unsupported U-Net extra inputs at node {index}")
+    if graph.output[0].name != values[7]:
+        raise ValueError("U-Net output is not produced by the final convolution")
+    if len(set(values)) != len(values):
+        raise ValueError("U-Net node outputs must be distinct")
+    if list(nodes[6].input) != [values[5], values[1]]:
         raise ValueError("unsupported U-Net skip connection")
     allowed_attrs = {
         0: {"kernel_shape", "pads", "strides", "dilations", "auto_pad", "group"},
