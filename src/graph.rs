@@ -423,6 +423,28 @@ fn infer_shape(
             input(0).cloned()
         }
         "Add" | "Sub" | "Mul" => broadcast(input(0)?, input(1)?),
+        "Concat" => {
+            let first = input(0)?.clone();
+            let rank = first.len();
+            let raw_axis = attr(node, "axis")?.i;
+            let axis = if raw_axis < 0 {
+                usize::try_from(i64::try_from(rank).ok()?.checked_add(raw_axis)?).ok()?
+            } else {
+                usize::try_from(raw_axis).ok()?
+            };
+            if axis >= rank {
+                return None;
+            }
+            let mut output = first;
+            for index in 1..node.input.len() {
+                let next = input(index)?;
+                if next.len() != rank || (0..rank).any(|dim| dim != axis && next[dim] != output[dim]) {
+                    return None;
+                }
+                output[axis] = output[axis].checked_add(next[axis])?;
+            }
+            Some(output)
+        }
         "ReduceMean" => {
             if attr(node, "keepdims").is_some_and(|value| value.i != 1) {
                 return None;

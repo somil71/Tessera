@@ -18,6 +18,7 @@ import onnx
 import rasterio
 
 from job_memory import JobMemoryLimit
+from local_graph import analyze_local
 from run_raster_attention import (run as run_attention,
                                   validate_model as validate_attention)
 from run_raster_fixed import (DEFAULT_DLL, DEFAULT_EXE, configure_gdal_cache, model_contract,
@@ -99,32 +100,35 @@ def candidate_tiles(height, width, maximum, family):
     return sizes
 
 
-def worker_shape_count(height, width, tile, family):
+def worker_shape_count(height, width, tile, family, local_plan=None):
     if family != "local_unet":
         return 1
     heights = set()
     for row in range(0, height, tile):
         core_h = min(tile, height-row)
-        top = max(0, row-4)
-        bottom = min(height, row+core_h+4)
+        top = max(0, row-local_plan.halo_y)
+        bottom = min(height, row+core_h+local_plan.halo_y)
         heights.add(bottom-top)
     widths = set()
     for col in range(0, width, tile):
         core_w = min(tile, width-col)
-        left = max(0, col-4)
-        right = min(width, col+core_w+4)
+        left = max(0, col-local_plan.halo_x)
+        right = min(width, col+core_w+local_plan.halo_x)
         widths.add(right-left)
     return len(heights)*len(widths)
 
 
 def profile_candidate(model, directory, family, tile, cut, channels, scores,
-                      height, width, exe, env, threads, job, storage_mode="memory"):
-    shape = ((min(height, tile+8), min(width, tile+8))
+                      height, width, exe, env, threads, job, storage_mode="memory",
+                      local_plan=None):
+    shape = ((min(height, tile+2*local_plan.halo_y),
+              min(width, tile+2*local_plan.halo_x))
              if family == "local_unet" else (tile, tile))
     candidate = dict(tile_size=tile, cut_after=cut, storage_mode=storage_mode,
                      probe_shape=list(shape),
                      tile_count=math.ceil(height/tile)*math.ceil(width/tile),
-                     worker_shape_count=worker_shape_count(height, width, tile, family))
+                     worker_shape_count=worker_shape_count(
+                         height, width, tile, family, local_plan))
     worker = None
     try:
         startup = time.perf_counter()
@@ -207,6 +211,7 @@ def run(args):
         job = JobMemoryLimit(args.memory_limit_mib*1024*1024)
         model = onnx.load(model_path)
         family, channels, scores, mean_name = model_family(model_path, model)
+        local_plan = analyze_local(model) if family == "local_unet" else None
         if family != "global_mean" and len(model.graph.node) < 2:
             raise ValueError("split worker requires at least two model nodes")
         with rasterio.open(source) as src:
@@ -261,7 +266,7 @@ def run(args):
                         trials.append(profile_candidate(
                             probe_model, directory, family, tile, cut, channels,
                             scores, height, width, exe, env, args.threads, job,
-                            "memory"))
+                            "memory", local_plan))
                 if family == "local_unet":
                     ram_ok = [trial for trial in trials if trial["status"] == "ok"]
                     best_ram = (min(ram_ok, key=lambda trial:
@@ -289,7 +294,7 @@ def run(args):
                     trials.append(profile_candidate(
                         probe_model, directory, family, tile, cut, channels,
                         scores, height, width, exe, env, args.threads, job,
-                        "disk"))
+                        "disk", local_plan))
             feasible = [trial for trial in trials
                         if trial["status"] == "ok" and
                         (trial["storage_mode"], trial["tile_size"],

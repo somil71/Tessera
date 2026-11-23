@@ -24,6 +24,7 @@ from rasterio.windows import Window
 from run_raster_fixed import (DEFAULT_DLL, DEFAULT_EXE, configure_gdal_cache,
                               execute, own_peak_commit_bytes, read_exact)
 from job_memory import JobMemoryLimit
+from local_graph import analyze_local
 
 
 def arguments():
@@ -257,21 +258,26 @@ def run(args, external_job=None):
         raise ValueError("output must differ from model and input")
     if output.exists() and not args.overwrite:
         raise FileExistsError(f"output already exists: {output}")
-    if args.tile_size < 2 or args.tile_size % 2 or args.threads < 1:
-        raise ValueError("U-Net tile size must be positive and even; threads must be positive")
+    if args.tile_size < 2 or args.threads < 1:
+        raise ValueError("U-Net tile size and threads must be positive")
     if args.memory_limit_mib is not None and args.memory_limit_mib < 1:
         raise ValueError("memory limit must be positive")
     if not np.isfinite(args.scale) or not np.isfinite(args.offset):
         raise ValueError("scale and offset must be finite")
     gdal_cachemax_mib = configure_gdal_cache(args.memory_limit_mib)
     channels, output_channels = validate_model(model)
+    local_plan = analyze_local(onnx.load(model))
+    if (args.tile_size % local_plan.alignment_y or
+            args.tile_size % local_plan.alignment_x):
+        raise ValueError("U-Net tile size must respect graph spatial alignment")
     with rasterio.open(source) as source_check:
         expected_crs = source_check.crs
         expected_shape = (source_check.height, source_check.width)
         if expected_crs is None or source_check.count != channels:
             raise ValueError("raster requires a CRS and the model's band count")
-        if source_check.height % 2 or source_check.width % 2:
-            raise ValueError("U-Net whole-image reference requires even raster dimensions")
+        if (source_check.height % local_plan.alignment_y or
+                source_check.width % local_plan.alignment_x):
+            raise ValueError("U-Net whole-image dimensions violate graph alignment")
     exe = args.exe.resolve(strict=True)
     dll = args.ort_dll.resolve(strict=True)
     env = os.environ.copy()
@@ -314,12 +320,10 @@ def run(args, external_job=None):
                     for col in range(0, src.width, args.tile_size):
                         core_h = min(args.tile_size, src.height - row)
                         core_w = min(args.tile_size, src.width - col)
-                        # Four pixels cover the encoder Conv, pool, bottleneck
-                        # Conv and decoder path. Even boundaries preserve pool phase.
-                        top = max(0, row - 4)
-                        left = max(0, col - 4)
-                        bottom = min(src.height, row + core_h + 4)
-                        right = min(src.width, col + core_w + 4)
+                        top = max(0, row - local_plan.halo_y)
+                        left = max(0, col - local_plan.halo_x)
+                        bottom = min(src.height, row + core_h + local_plan.halo_y)
+                        right = min(src.width, col + core_w + local_plan.halo_x)
                         shape = (bottom - top, right - left)
                         shapes.setdefault(shape, []).append((row, col, core_h, core_w, top, left))
                 # Output windows may be written in any order. Grouping by halo
@@ -355,7 +359,9 @@ def run(args, external_job=None):
                       shape=[src.height, src.width], crs=str(src.crs),
                       transform=list(src.transform), tile_size=args.tile_size,
                       gdal_cachemax_mib=gdal_cachemax_mib,
-                      tile_count=tiles, halo_pixels=4, alignment_pixels=2,
+                      tile_count=tiles,
+                      halo_pixels=[local_plan.halo_y, local_plan.halo_x],
+                      alignment_pixels=[local_plan.alignment_y, local_plan.alignment_x],
                       worker_shapes=[list(shape) for shape in shapes],
                       cut_after=args.cut_after,
                       boundary_storage=getattr(args, "storage_mode", "memory"),

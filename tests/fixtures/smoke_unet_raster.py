@@ -137,6 +137,6 @@ bad_output.unlink(missing_ok=True)
 failed = subprocess.run([PYTHON, RUNNER, "--model", MODEL, "--input", bad_source,
                          "--output", bad_output, "--tile-size", "8"],
                         capture_output=True, text=True)
-assert failed.returncode != 0 and "even raster dimensions" in failed.stderr
+assert failed.returncode != 0 and "violate graph alignment" in failed.stderr
 assert not bad_output.exists()
 print("odd-size whole-image contract: rejected before output")

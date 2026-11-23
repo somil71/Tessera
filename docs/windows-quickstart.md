@@ -37,6 +37,7 @@ If the run cannot plan or execute within the cap, inspect `runs\scores.plan.fail
 cargo test
 .\.venv\Scripts\python.exe tests\fixtures\smoke_auto_raster.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_pointwise_operators.py
+.\.venv\Scripts\python.exe tests\fixtures\smoke_local_graph.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_storage_planner.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_job_memory.py
 ```
