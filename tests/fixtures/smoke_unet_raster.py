@@ -43,7 +43,8 @@ for tile_size, order, scale, offset in (
                      "--scale", str(scale), "--offset", str(offset)])
     result = subprocess.run([PYTHON, RUNNER, "--model", MODEL, "--input", SOURCE,
                              "--output", OUTPUT, "--tile-size", str(tile_size),
-                             "--overwrite", *preprocessing], capture_output=True, text=True)
+                             "--memory-limit-mib", "128", "--overwrite", *preprocessing],
+                            capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     with rasterio.open(OUTPUT) as raster:
         actual = raster.read()
@@ -56,6 +57,8 @@ for tile_size, order, scale, offset in (
     report = json.loads(OUTPUT.with_suffix(".report.json").read_text())
     assert report["tile_count"] == ((38+tile_size-1)//tile_size)*((54+tile_size-1)//tile_size)
     assert report["raw_bridge_bytes"] == 0
+    assert report["memory_limit_enforced"] is True
+    assert report["job_peak_conservative_upper_bound_bytes"] <= 128 * 1024 * 1024
     print(f"U-Net tile {tile_size}: max_abs={max_abs:.3g}, shapes={len(report['worker_shapes'])}")
 
 print("exact U-Net raster tiling passed")

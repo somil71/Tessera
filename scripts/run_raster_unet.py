@@ -21,6 +21,7 @@ import rasterio
 from rasterio.windows import Window
 
 from run_raster_fixed import DEFAULT_DLL, DEFAULT_EXE, execute, own_peak_commit_bytes, read_exact
+from job_memory import JobMemoryLimit
 
 
 def arguments():
@@ -31,6 +32,8 @@ def arguments():
     parser.add_argument("--cut-after", type=int, default=4)
     parser.add_argument("--tile-size", type=int, default=256)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--memory-limit-mib", type=int,
+                        help="Enforce a Windows job-wide committed-memory budget")
     parser.add_argument("--band-order", help="Comma-separated 1-based source band indexes")
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--offset", type=float, default=0.0)
@@ -122,7 +125,8 @@ def validate_model(path):
 
 
 class Worker:
-    def __init__(self, exe, env, model, directory, shape, cut, channels, threads):
+    def __init__(self, exe, env, model, directory, shape, cut, channels, threads,
+                 job=None):
         self.height, self.width = shape
         self.directory = directory
         directory.mkdir()
@@ -131,17 +135,26 @@ class Worker:
         self.process = None
         try:
             execute([exe, "split", model, "--cut-after", str(cut), "--height",
-                     str(self.height), "--width", str(self.width), "--out-dir", directory], env)
+                     str(self.height), "--width", str(self.width), "--out-dir", directory], env, job)
             self.process = subprocess.Popen(
-                [exe, "serve-split-pipe", self.head, self.tail, "--channels", str(channels),
+                [exe, *(["--await-start"] if job is not None else []),
+                 "serve-split-pipe", self.head, self.tail, "--channels", str(channels),
                  "--height", str(self.height), "--width", str(self.width),
                  "--threads", str(threads)],
                 env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, bufsize=0,
             )
+            if job is not None:
+                job.assign_process(self.process)
+                self.process.stdin.write(b"\x01")
+                self.process.stdin.flush()
             line = self.process.stdout.readline()
             if not line or json.loads(line).get("ready") is not True:
-                raise RuntimeError(f"Rust worker failed to start for {shape}: {self.process.stderr.read()}")
+                exit_code = self.process.wait(timeout=5)
+                raise RuntimeError(
+                    f"Rust worker failed to start for {shape} under the requested memory budget: "
+                    f"exit {exit_code}; {self.process.stderr.read()}"
+                )
         except Exception:
             if self.process is not None:
                 self.process.terminate()
@@ -196,9 +209,18 @@ def run(args):
         raise FileExistsError(f"output already exists: {output}")
     if args.tile_size < 2 or args.tile_size % 2 or args.threads < 1:
         raise ValueError("U-Net tile size must be positive and even; threads must be positive")
+    if args.memory_limit_mib is not None and args.memory_limit_mib < 1:
+        raise ValueError("memory limit must be positive")
     if not np.isfinite(args.scale) or not np.isfinite(args.offset):
         raise ValueError("scale and offset must be finite")
     channels, output_channels = validate_model(model)
+    with rasterio.open(source) as source_check:
+        expected_crs = source_check.crs
+        expected_shape = (source_check.height, source_check.width)
+        if expected_crs is None or source_check.count != channels:
+            raise ValueError("raster requires a CRS and the model's band count")
+        if source_check.height % 2 or source_check.width % 2:
+            raise ValueError("U-Net whole-image reference requires even raster dimensions")
     exe = args.exe.resolve(strict=True)
     dll = args.ort_dll.resolve(strict=True)
     env = os.environ.copy()
@@ -207,17 +229,21 @@ def run(args):
     work = output.parent / f".{output.stem}.work-{uuid4().hex}"
     work.mkdir()
     partial = output.parent / f".{output.stem}.partial-{uuid4().hex}.tif"
+    failure_path = output.with_suffix(".failure.json")
     worker = None
+    job = None
+    published = False
     shapes = {}
     peak_child = 0
     peak_scheduler = 0
     tiles = 0
     try:
+        if args.memory_limit_mib is not None:
+            job = JobMemoryLimit(args.memory_limit_mib * 1024 * 1024)
         with rasterio.open(source) as src:
-            if src.crs is None or src.count != channels:
-                raise ValueError("raster requires a CRS and the model's band count")
-            if src.height % 2 or src.width % 2:
-                raise ValueError("U-Net whole-image reference requires even raster dimensions")
+            if (src.crs != expected_crs or src.count != channels
+                    or (src.height, src.width) != expected_shape):
+                raise RuntimeError("raster metadata changed or could not be read under the memory limit")
             bands = (tuple(int(part) for part in args.band_order.split(","))
                      if args.band_order else tuple(range(1, channels + 1)))
             if sorted(bands) != list(range(1, channels + 1)):
@@ -247,7 +273,7 @@ def run(args):
                 for shape, jobs in shapes.items():
                     worker = Worker(exe, env, model,
                         work / f"shape_{shape[0]}x{shape[1]}", shape,
-                        args.cut_after, channels, args.threads)
+                        args.cut_after, channels, args.threads, job)
                     for row, col, core_h, core_w, top, left in jobs:
                         window = Window(left, top, shape[1], shape[0])
                         if np.any(src.read_masks(window=window) != 255):
@@ -265,6 +291,7 @@ def run(args):
                     worker.close()
                     worker = None
         os.replace(partial, output)
+        published = True
         report = dict(model=str(model), input=str(source), output=str(output),
                       shape=[src.height, src.width], crs=str(src.crs),
                       transform=list(src.transform), tile_size=args.tile_size,
@@ -276,15 +303,33 @@ def run(args):
                       max_child_peak_commit_bytes=peak_child,
                       scheduler_peak_commit_bytes=peak_scheduler,
                       combined_process_peak_upper_bound_bytes=peak_child+peak_scheduler,
+                      memory_limit_bytes=job.budget_bytes if job else None,
+                      job_peak_committed_bytes=job.peak_job_bytes() if job else None,
+                      job_peak_conservative_upper_bound_bytes=(
+                          job.conservative_peak_bytes() if job else None),
                       raw_bridge_bytes=0, numerical_error=None,
-                      memory_limit_enforced=False)
+                      memory_limit_enforced=job is not None)
         output.with_suffix(".report.json").write_text(json.dumps(report, indent=2)+"\n")
+        failure_path.unlink(missing_ok=True)
         print(f"wrote {output}; {tiles} U-Net tiles")
+    except Exception as exc:
+        failure = dict(status="failed", error=str(exc),
+                       elapsed_seconds=time.perf_counter()-started,
+                       memory_limit_bytes=(args.memory_limit_mib * 1024 * 1024
+                                           if args.memory_limit_mib is not None else None),
+                       job_peak_committed_bytes=job.peak_job_bytes() if job else None,
+                       job_peak_conservative_upper_bound_bytes=(
+                           job.conservative_peak_bytes() if job else None),
+                       output_published=published)
+        failure_path.write_text(json.dumps(failure, indent=2)+"\n")
+        raise
     finally:
         if worker is not None:
             worker.close()
         partial.unlink(missing_ok=True)
         work.rmdir()
+        if job is not None:
+            job.close()
 
 
 if __name__ == "__main__":

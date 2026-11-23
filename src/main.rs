@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -15,6 +16,9 @@ mod split;
     about = "Inspect ONNX models for memory-bounded raster inference"
 )]
 struct Cli {
+    /// Wait for one byte on stdin before loading a model or running a command.
+    #[arg(long, global = true)]
+    await_start: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -117,6 +121,13 @@ enum Command {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    if cli.await_start {
+        let mut start = [0_u8; 1];
+        std::io::stdin().read_exact(&mut start)?;
+        if start[0] != 1 {
+            return Err("invalid start signal".into());
+        }
+    }
 
     match cli.command {
         Command::Inspect { model } => inspect(model)?,

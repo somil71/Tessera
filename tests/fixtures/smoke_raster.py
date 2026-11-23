@@ -66,6 +66,8 @@ for tile_size, band_order, scale, offset in (
             "0",
             "--tile-size",
             str(tile_size),
+            "--memory-limit-mib",
+            "128",
             "--overwrite",
             *preprocess,
         ],
@@ -87,6 +89,8 @@ for tile_size, band_order, scale, offset in (
     )
     assert report["max_child_peak_commit_bytes"] > 0
     assert report["worker_mode"] == "pipe"
+    assert report["memory_limit_enforced"] is True
+    assert report["job_peak_conservative_upper_bound_bytes"] <= 128 * 1024 * 1024
     assert report["raw_bridge_bytes"] == 0
     assert report["combined_process_peak_upper_bound_bytes"] >= report[
         "max_child_peak_commit_bytes"
@@ -156,3 +160,18 @@ unsupported = subprocess.run(
 assert unsupported.returncode != 0 and "not a supported pointwise" in unsupported.stderr
 assert not unsupported_output.exists()
 print("spatial U-Net: rejected before raster execution")
+
+limited_output = OUT / "memory_limited_should_not_exist.tif"
+limited_output.unlink(missing_ok=True)
+limited = subprocess.run(
+    [PYTHON, RUNNER, "--model", MODEL, "--input", SOURCE,
+     "--output", limited_output, "--cut-after", "0", "--tile-size", "16",
+     "--memory-limit-mib", "60"],
+    capture_output=True, text=True,
+)
+assert limited.returncode != 0
+assert not limited_output.exists()
+failure = json.loads(limited_output.with_suffix(".failure.json").read_text())
+assert failure["status"] == "failed" and failure["output_published"] is False
+assert failure["memory_limit_bytes"] == 60 * 1024 * 1024
+print("60 MiB cap: failed with report and no published raster")

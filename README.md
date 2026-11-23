@@ -53,7 +53,7 @@ Run the fixed raster prototype with a pixelwise ONNX model and a georeferenced G
 ```
 
 The wrapper supports `--band-order 3,2,1`, `--scale`, and `--offset`. It rejects declared no-data and non-finite pixels. It writes a JSON report beside the output. The wrapper uses Rasterio 1.4.4; install all pinned Python dependencies with `.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt`.
-Use `--worker-mode persistent` to compare the file-backed worker or `--worker-mode fresh` for a fresh Rust process per tile. The default `pipe` mode writes no raw tile bridge files. The report records separate Python and Rust peak committed memory and their conservative sum; no job-wide cap is enforced yet.
+Use `--worker-mode persistent` to compare the file-backed worker or `--worker-mode fresh` for a fresh Rust process per tile. The default `pipe` mode writes no raw tile bridge files. Pass `--memory-limit-mib 2048` to enforce a [Windows job-wide committed-memory cap](docs/phase4-job-memory-results.md) across the Python scheduler and Rust processes. This argument remains optional for development comparisons; the future planner CLI will require it.
 
 For the frozen U-Net topology and an even-size raster, run the fixed exact spatial schedule:
 

@@ -24,6 +24,8 @@ from onnx import TensorProto, helper
 import rasterio
 from rasterio.windows import Window
 
+from job_memory import JobMemoryLimit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXE = ROOT / "target" / "debug" / "raster-compiler.exe"
@@ -40,6 +42,8 @@ def arguments():
     parser.add_argument("--cut-after", type=int, required=True)
     parser.add_argument("--tile-size", type=int, default=256)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--memory-limit-mib", type=int,
+                        help="Enforce a Windows job-wide committed-memory budget")
     parser.add_argument(
         "--worker-mode", choices=("pipe", "persistent", "fresh"), default="pipe"
     )
@@ -102,8 +106,22 @@ def model_contract(path, tile_size):
     return input_channels, output_channels
 
 
-def execute(command, env):
-    result = subprocess.run(command, env=env, text=True, capture_output=True)
+def execute(command, env, job=None):
+    if job is None:
+        result = subprocess.run(command, env=env, text=True, capture_output=True)
+    else:
+        guarded = [command[0], "--await-start", *command[1:]]
+        process = subprocess.Popen(guarded, env=env, text=True,
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        try:
+            job.assign_process(process)
+            stdout, stderr = process.communicate("\x01")
+        except Exception:
+            process.terminate()
+            process.communicate()
+            raise
+        result = subprocess.CompletedProcess(guarded, process.returncode, stdout, stderr)
     if result.returncode:
         raise RuntimeError(
             f"command failed ({result.returncode}): {command}\n{result.stdout}\n{result.stderr}"
@@ -175,9 +193,20 @@ def run(args):
         raise FileExistsError(f"output already exists: {output}; pass --overwrite to replace it")
     if args.tile_size < 1 or args.threads < 1 or args.cut_after < 0:
         raise ValueError("tile size and threads must be positive; cut index must be nonnegative")
+    if args.memory_limit_mib is not None and args.memory_limit_mib < 1:
+        raise ValueError("memory limit must be positive")
     if not np.isfinite(args.scale) or not np.isfinite(args.offset):
         raise ValueError("scale and offset must be finite")
     input_channels, output_channels = model_contract(model, args.tile_size)
+    with rasterio.open(source) as source_check:
+        expected_crs = source_check.crs
+        expected_shape = (source_check.height, source_check.width)
+        if expected_crs is None:
+            raise ValueError("input GeoTIFF has no CRS")
+        if source_check.count != input_channels:
+            raise ValueError(
+                f"model requires {input_channels} bands, raster has {source_check.count}"
+            )
     exe = args.exe.resolve(strict=True)
     dll = args.ort_dll.resolve(strict=True)
     env = os.environ.copy()
@@ -187,6 +216,7 @@ def run(args):
     work.mkdir()
     temporary_output = output.parent / f".{output.stem}.partial-{uuid4().hex}.tif"
     report_path = output.with_suffix(".report.json")
+    failure_path = output.with_suffix(".failure.json")
     tile_input = work / "tile.f32"
     tile_output = work / "scores.f32"
     head = work / "head.onnx"
@@ -196,7 +226,11 @@ def run(args):
     max_scheduler_commit = 0
     raw_bridge_bytes = 0
     worker = None
+    job = None
+    published = False
     try:
+        if args.memory_limit_mib is not None:
+            job = JobMemoryLimit(args.memory_limit_mib * 1024 * 1024)
         execute(
             [
                 exe,
@@ -212,11 +246,13 @@ def run(args):
                 work,
             ],
             env,
+            job,
         )
         if args.worker_mode in {"persistent", "pipe"}:
             worker = subprocess.Popen(
                 [
                     exe,
+                    *(["--await-start"] if job is not None else []),
                     "serve-split-pipe" if args.worker_mode == "pipe" else "serve-split",
                     head,
                     tail,
@@ -236,17 +272,24 @@ def run(args):
                 text=args.worker_mode != "pipe",
                 bufsize=0 if args.worker_mode == "pipe" else 1,
             )
+            if job is not None:
+                job.assign_process(worker)
+                worker.stdin.write(b"\x01" if args.worker_mode == "pipe" else "\x01")
+                worker.stdin.flush()
             ready_line = worker.stdout.readline()
             if not ready_line:
-                raise RuntimeError(f"Rust worker failed to start: {worker.stderr.read()}")
+                exit_code = worker.wait(timeout=5)
+                raise RuntimeError(
+                    f"Rust worker failed to start under the requested memory budget "
+                    f"(exit {exit_code}): {worker.stderr.read()}"
+                )
             ready = json.loads(ready_line)
             if ready.get("ready") is not True:
                 raise RuntimeError(f"unexpected Rust worker response: {ready}")
         with rasterio.open(source) as src:
-            if src.crs is None:
-                raise ValueError("input GeoTIFF has no CRS")
-            if src.count != input_channels:
-                raise ValueError(f"model requires {input_channels} bands, raster has {src.count}")
+            if (src.crs != expected_crs or src.count != input_channels
+                    or (src.height, src.width) != expected_shape):
+                raise RuntimeError("raster metadata changed or could not be read under the memory limit")
             if args.band_order:
                 bands = tuple(int(part) for part in args.band_order.split(","))
             else:
@@ -328,6 +371,7 @@ def run(args):
                                     str(args.threads),
                                 ],
                                 env,
+                                job,
                             )
                             metrics = next(
                                 line
@@ -370,6 +414,7 @@ def run(args):
                             max_scheduler_commit, own_peak_commit_bytes()
                         )
         os.replace(temporary_output, output)
+        published = True
         report = {
             "model": str(model),
             "input": str(source),
@@ -391,13 +436,32 @@ def run(args):
             "scheduler_peak_commit_bytes": max_scheduler_commit,
             "combined_process_peak_upper_bound_bytes": max_child_commit
             + max_scheduler_commit,
+            "memory_limit_bytes": (args.memory_limit_mib * 1024 * 1024
+                                   if args.memory_limit_mib is not None else None),
+            "job_peak_committed_bytes": job.peak_job_bytes() if job else None,
+            "job_peak_conservative_upper_bound_bytes":
+                job.conservative_peak_bytes() if job else None,
             "raw_bridge_bytes": raw_bridge_bytes,
             "numerical_error": None,
-            "memory_limit_enforced": False,
-            "notes": "The sum of separate process peaks is a conservative upper bound, not a measured simultaneous job-wide peak. Pipe mode keeps tile data in memory.",
+            "memory_limit_enforced": job is not None,
+            "notes": "Separate process peaks are not simultaneous. The job counter measures the job-wide peak; its conservative upper bound adds pre-assignment scheduler commitment. Pipe mode keeps tile data in memory.",
         }
         report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        failure_path.unlink(missing_ok=True)
         print(f"wrote {output} and {report_path}; {tiles} tiles")
+    except Exception as exc:
+        failure = {
+            "status": "failed",
+            "error": str(exc),
+            "elapsed_seconds": time.perf_counter() - started,
+            "memory_limit_bytes": job.budget_bytes if job else None,
+            "job_peak_committed_bytes": job.peak_job_bytes() if job else None,
+            "job_peak_conservative_upper_bound_bytes":
+                job.conservative_peak_bytes() if job else None,
+            "output_published": published,
+        }
+        failure_path.write_text(json.dumps(failure, indent=2) + "\n", encoding="utf-8")
+        raise
     finally:
         if worker is not None:
             if worker.poll() is None:
@@ -413,6 +477,8 @@ def run(args):
         for path in (tile_input, tile_output, head, tail):
             path.unlink(missing_ok=True)
         work.rmdir()
+        if job is not None:
+            job.close()
 
 
 if __name__ == "__main__":

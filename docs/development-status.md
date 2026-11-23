@@ -13,7 +13,7 @@ Raster Compiler aims to run an ONNX vision model on a GeoTIFF too large for norm
 | Phase 1: foundation | Rust CLI, ONNX Runtime loading, generated ONNX fixtures, frozen support and evaluation documents | Defines the target user, exact correctness reference, model families, and baseline rules before planner work | Three engineering model fixtures pass ONNX Runtime smoke execution; the originally designated attention holdout was later exposed in development |
 | Phase 2: graph analysis | ONNX wiring validation, producers and consumers, supported shape inference, tensor byte estimates, live tensors and byte totals at each cut | A planner needs explicit dependencies and boundary sizes before it can choose where to split or store tensors | Five Rust unit tests and graph inspection of U-Net, global mean, and attention fixtures |
 | Phase 3: subgraph execution | Head/tail model extraction, sequential Rust ONNX Runtime execution, boundary materialization, whole-model comparison, Windows process memory readings at execution stages | Tests whether a graph cut is both numerically correct and actually cheaper in process memory | All 16 internal cuts across three fixtures matched whole-model smoke outputs; [Phase 3 report](phase3-results.md) measures a larger U-Net |
-| Phase 4: fixed raster prototype | Python Rasterio window schedulers feeding persistent Rust split workers through pipes; pixelwise windows and an exact four-pixel-halo schedule for the frozen local U-Net; georeferenced FP32 output and JSON reports | Connects the compiler core to a real raster format and establishes exact local spatial tiling | Pixelwise 37×53 and U-Net 38×54 rasters matched whole-image outputs exactly across tested tile sizes; CRS, transform, preprocessing, and rejection cases passed. See [U-Net results](phase4-unet-results.md) |
+| Phase 4: fixed raster prototype | Python Rasterio window schedulers feeding persistent Rust split workers through pipes; pixelwise and exact local U-Net windows; georeferenced FP32 output; optional Windows Job Object cap and JSON success/failure reports | Connects the compiler core to a real raster format, establishes exact local tiling, and tests job-wide committed-memory enforcement | Pixelwise 37×53 and U-Net 38×54 rasters matched whole-image outputs exactly under a 128 MiB cap. A 48 MiB job accepted an 8 MiB commit and rejected 64 MiB. See [U-Net results](phase4-unet-results.md) and [job memory results](phase4-job-memory-results.md) |
 
 The source of each piece is [graph.rs](../src/graph.rs), [split.rs](../src/split.rs), [execute.rs](../src/execute.rs), [memory.rs](../src/memory.rs), and [run_raster_fixed.py](../scripts/run_raster_fixed.py). Test fixtures and benchmark scripts live in `tests/`.
 
@@ -24,7 +24,7 @@ The source of each piece is [graph.rs](../src/graph.rs), [split.rs](../src/split
 3. Rust `run` executes one model on raw little-endian NCHW FP32 data. Rust `run-split` executes the head, copies required boundary tensors, releases the head session, then loads and executes the tail. It writes raw FP32 scores. Keeping the original input alive through the head run fixed an aliasing error discovered during testing.
 4. The fixed pixelwise raster prototype validates that each operation is independent at every pixel. A second, topology-checked U-Net path aligns output tiles to the pool stride, adds a four-pixel input halo, clips at true image edges, and crops the returned scores. Both send raw tile bytes to persistent Rust `serve-split-pipe` workers and write georeferenced FP32 windows. Rasterio copies the source CRS and transform into the output profile. [Rasterio's window API](https://rasterio.readthedocs.io/en/stable/topics/windowed-rw.html) supplies the windowed I/O.
 
-Python currently owns GeoTIFF I/O because Rasterio has a Windows wheel in the pinned Python 3.11 environment, while native GDAL is not installed in the workspace. The first version used a raw-file bridge and one Rust process per tile. The default now keeps both ONNX Runtime sessions loaded and sends tile data over pipes. On the 12-window smoke workload, median elapsed time fell from 1.647 s with fresh processes to 0.240 s with pipes; Rust worker peak committed memory rose from 16.95 to 18.22 MiB. See [worker measurements](phase4-worker-results.md). The Python scheduler's own peak and Rust worker peak are reported separately; their sum is only an upper bound until a Windows Job Object measures them together.
+Python currently owns GeoTIFF I/O because Rasterio has a Windows wheel in the pinned Python 3.11 environment, while native GDAL is not installed in the workspace. The first version used a raw-file bridge and one Rust process per tile. The default now keeps both ONNX Runtime sessions loaded and sends tile data over pipes. On the 12-window smoke workload, median elapsed time fell from 1.647 s with fresh processes to 0.240 s with pipes; Rust worker peak committed memory rose from 16.95 to 18.22 MiB. See [worker measurements](phase4-worker-results.md). The newer optional memory budget joins the Python scheduler and all Rust model processes to a Windows Job Object and records its peak committed memory; [the cap test](phase4-job-memory-results.md) also verifies an over-budget commit fails.
 
 ## What the measurements say
 
@@ -37,7 +37,7 @@ The separate U-Net raster path matched whole-image logits exactly at tile sizes 
 ## Remaining gaps
 
 - There is no automatic cut, keep/spill/recompute planner. Manual cuts are exploratory.
-- There is no Windows Job Object limit yet. Rust reports each child process's peak committed bytes and working set; the raster report does not include the Python scheduler in a job-wide peak.
+- The two fixed raster runners can enforce a Windows Job Object committed-memory cap when requested, but there is no automatic choice of tile size or graph cut. The final v1 CLI must require the cap and choose a feasible plan. Job-wide peak working set is not yet measured.
 - Raster execution has two fixed paths: pixelwise models and the validated development U-Net topology. There is no generic receptive-field analyzer yet. Global mean needs a whole-image reduction pass. Global attention needs a blockwise exact schedule. Unsupported models are rejected rather than silently miscomputed.
 - The default raster path has a persistent Rust worker and no raw tile bridge, but Python still owns GeoTIFF I/O. It is a correctness prototype, not a large-raster performance result.
 - The output report has no numerical error estimate for an arbitrary user raster because a whole-image reference may not fit. The test harness calculates error on small reference cases.
@@ -47,7 +47,7 @@ The separate U-Net raster path matched whole-image logits exactly at tile sizes 
 
 1. Generalize the local-model halo and alignment analysis beyond the frozen U-Net topology, and integrate it with automatic tile and cut selection.
 2. Add the global-mean model with an explicit first reduction pass, then the blockwise attention path with a cost estimate and an infeasibility report when appropriate.
-3. Implement a planner that chooses keep, spill, or recompute using measured memory and disk costs. Enforce a job-wide committed-memory cap with a Windows Job Object, including the Python raster scheduler and Rust worker.
+3. Implement a planner that chooses tile size, graph cut, and keep/spill/recompute using measured memory and disk costs. Make the existing Job Object cap mandatory in the final CLI and add job-wide working-set measurement.
 4. Freeze a new independent holdout under a versioned protocol, then run the development and held-out evaluation, retain failures and raw reports, compare against the four-hour tuned baseline, and test a real user model and raster.
 
 ## Reproduce the current checks
@@ -64,6 +64,7 @@ cargo clippy --all-targets -- -D warnings
 .\.venv\Scripts\python.exe tests\fixtures\smoke_rust_execution.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_raster.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_unet_raster.py
+.\.venv\Scripts\python.exe tests\fixtures\smoke_job_memory.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_worker.py
 .\.venv\Scripts\python.exe tests\benchmark_phase3.py
 .\.venv\Scripts\python.exe tests\benchmark_worker.py
