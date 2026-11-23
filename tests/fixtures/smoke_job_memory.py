@@ -35,6 +35,7 @@ try:
     assert large_state["allocated"] is False, large_state
     resources = job.resource_snapshot()
     assert resources["job_peak_working_set_sampled_bytes"] > 0
+    assert 0 < resources["job_peak_private_commit_sampled_bytes"] <= limit
     assert resources["working_set_sample_count"] >= 1
     assert resources["job_io_read_transfer_bytes"] >= 0
     assert resources["job_io_write_transfer_bytes"] >= 0

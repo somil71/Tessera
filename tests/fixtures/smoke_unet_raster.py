@@ -111,6 +111,22 @@ auto_report = json.loads(auto_output.with_suffix(".report.json").read_text())
 assert auto_report["strategy"] == "auto-local_unet"
 print("renamed U-Net: automatic schedule matched whole-image reference")
 
+disk_output = OUT / "disk_scores.tif"
+result = subprocess.run([PYTHON, RUNNER, "--model", MODEL, "--input", SOURCE,
+                         "--output", disk_output, "--tile-size", "16",
+                         "--cut-after", "4", "--storage-mode", "disk",
+                         "--memory-limit-mib", "128", "--overwrite"],
+                        capture_output=True, text=True)
+assert result.returncode == 0, result.stderr
+with rasterio.open(disk_output) as raster:
+    assert np.array_equal(raster.read(), reference)
+disk_report = json.loads(disk_output.with_suffix(".report.json").read_text())
+assert disk_report["boundary_storage"] == "disk"
+assert disk_report["boundary_spill_write_bytes"] > 0
+assert disk_report["boundary_spill_write_bytes"] == disk_report["boundary_spill_read_bytes"]
+assert disk_report["job_peak_conservative_upper_bound_bytes"] <= 128 * 1024 * 1024
+print("disk-spill U-Net tiles: matched whole-image reference")
+
 bad_source = OUT / "odd_width.tif"
 with rasterio.open(bad_source, "w", driver="GTiff", width=53, height=38,
                    count=3, dtype="float32", crs="EPSG:32643",

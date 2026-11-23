@@ -8,7 +8,7 @@ The [v1 support contract](docs/v1-contract.md) and [frozen evaluation protocol](
 
 ## Current state
 
-The CLI loads an ONNX model, reports its input and output tensors, validates graph wiring, lists tensor producers and consumers, estimates tensor sizes for an image shape, and reports live tensors and their byte totals at every possible cut. It rejects inconsistent resolved output shapes and leaves unsupported shape patterns as `unknown`. Cut totals cover boundary tensors only; they are not peak process memory. The CLI can write two ONNX subgraphs at a chosen cut and execute them sequentially on a raw FP32 input. Python raster runners handle four validated model patterns and enforce a Windows Job Object committed-memory cap when requested. The automatic runner profiles tile sizes and graph cuts for local models, then executes a feasible choice; its attention path estimates runtime and uses blockwise online softmax. It does not yet plan keep, spill, or recompute decisions.
+The CLI loads an ONNX model, reports its input and output tensors, validates graph wiring, lists tensor producers and consumers, estimates tensor sizes for an image shape, and reports live tensors and their byte totals at every possible cut. It rejects inconsistent resolved output shapes and leaves unsupported shape patterns as `unknown`. Cut totals cover boundary tensors only; they are not peak process memory. The CLI can write two ONNX subgraphs at a chosen cut and execute them sequentially on a raw FP32 input. Python raster runners handle four validated model patterns and enforce a Windows Job Object committed-memory cap when requested. The automatic runner profiles tile sizes, graph cuts, and U-Net graph-boundary storage when the measured runtime warrants it; its attention path estimates runtime and uses blockwise online softmax. It does not yet implement recomputation or a general storage planner for arbitrary ONNX graphs.
 
 ```powershell
 cargo run -- inspect path\to\model.onnx
@@ -19,7 +19,7 @@ cargo run -- run path\to\model.onnx --input-f32 data\input.f32 --output-f32 runs
 cargo run -- run-split runs\split\head.onnx runs\split\tail.onnx --input-f32 data\input.f32 --output-f32 runs\split.f32 --channels 3 --height 1024 --width 1024
 ```
 
-`run-split` also accepts `--spill-boundary --spill-dir runs\spill` to move intermediate tensors to disk between the head and tail sessions. The [spill experiment](docs/phase7-boundary-spill-results.md) measured its memory savings and runtime cost. This mode is experimental and is not yet selected by the automatic raster planner.
+`run-split` also accepts `--spill-boundary --spill-dir runs\spill` to move intermediate tensors to disk between the head and tail sessions. The [spill experiment](docs/phase7-boundary-spill-results.md) measured its memory savings and runtime cost. The [U-Net raster planner](docs/phase8-storage-planner-results.md) can now profile and select this mode when needed.
 
 The `ort` dependency loads ONNX Runtime dynamically. On this machine, the Rust target is `x86_64-pc-windows-gnu`, which has no matching prebuilt ONNX Runtime package in `ort`. To run `inspect`, provide a compatible `onnxruntime.dll` and set `ORT_DYLIB_PATH` to its full path. `graph` reads the ONNX file without loading ONNX Runtime. Keep local models in `models/`, rasters in `data/`, and experiment outputs in `runs/`. These directories are excluded from Git.
 
@@ -68,7 +68,7 @@ For the frozen U-Net topology and an even-size raster, run the fixed exact spati
 .\.venv\Scripts\python.exe scripts\run_raster_unet.py --model models\evaluation\unet_dev.onnx --input data\input.tif --output runs\unet_scores.tif --tile-size 256
 ```
 
-This path validates the supported topology without depending on the development fixture's tensor names, aligns tiles to the pool stride, reads a four-pixel halo, and clips halo windows at real image edges. It does not choose tile size or cut automatically.
+This path validates the supported topology without depending on the development fixture's tensor names, aligns tiles to the pool stride, reads a four-pixel halo, and clips halo windows at real image edges. It does not choose tile size or cut automatically. Add `--storage-mode disk` to use graph-boundary spill at the selected cut.
 
 For the supported global-mean pattern, stream the reduction pass and execute the transformed pointwise graph under one job-wide cap:
 
@@ -82,7 +82,7 @@ To choose a supported execution schedule automatically:
 .\.venv\Scripts\python.exe scripts\run_raster_auto.py --model models\evaluation\unet_dev.onnx --input data\input.tif --output runs\auto_scores.tif --memory-limit-mib 2048
 ```
 
-The report includes every calibrated candidate, the selected plan, and planning time. `--max-tile-size` optionally bounds the local-model search; no schedule parameter is required. For the validated attention fixture, the auto path uses blockwise softmax and rejects estimates above 30 minutes before staging raster data. [Runtime resource accounting](docs/runtime-resource-accounting.md) describes the enforced committed-memory peak, sampled working-set sum, and job I/O transfer counters. The [alternated benchmark runner](docs/evaluation-runner.md) records first-run and repeated automatic/manual comparisons; the required tuned independent evaluation remains unfinished.
+The report includes every calibrated candidate, the selected plan, and planning time. `--max-tile-size` optionally bounds the local-model search; no schedule parameter is required. For U-Net models, it profiles disk-boundary candidates when RAM plans fail or a larger disk tile may offset its measured cost. `--explore-spill` forces extra disk probes for diagnostics. For the validated attention fixture, the auto path uses blockwise softmax and rejects estimates above 30 minutes before staging raster data. [Runtime resource accounting](docs/runtime-resource-accounting.md) describes the enforced job cap, sampled resource use, and job I/O transfer counters. The [alternated benchmark runner](docs/evaluation-runner.md) records first-run and repeated automatic/manual comparisons; the required tuned independent evaluation remains unfinished.
 
 ## Build order
 

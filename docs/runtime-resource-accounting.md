@@ -1,10 +1,11 @@
 # Windows runtime resource accounting
 
-The scheduler and its Rust children join one memory-limited Windows Job Object. The `job_peak_committed_bytes` and conservative upper bound remain the enforcement evidence. The conservative value adds scheduler commitment that existed before assignment. Successful automatic runs must keep it at or below the requested budget.
+The scheduler and its Rust children join one memory-limited Windows Job Object. The configured hard limit is the enforcement mechanism. Reports retain the raw `job_peak_committed_bytes` counter and a conservative value that adds scheduler commitment from before assignment. After rejected planner probes, the raw counter has been observed above the configured limit even when the selected run completes. [Evaluation amendment 2](evaluation-amendment-2.md) defines how to audit that case without hiding the counter value.
 
 Current reports also include:
 
 - `job_peak_working_set_sampled_bytes`: the largest observed sum of live job-process working sets, sampled every 50 ms and once at report generation. `working_set_sample_count` and `working_set_incomplete_samples` describe coverage. This is **not an exact peak**; short spikes can be missed.
+- `job_peak_private_commit_sampled_bytes`: the largest observed sum of live job-process `PrivateUsage` values at those same samples. This is a current private-commit measurement, not an atomic or exact historical job peak. `job_enforced_limit_bytes` records the configured hard limit. `job_peak_counter_exceeds_budget` compares the raw job peak with that limit; `job_peak_conservative_exceeds_budget` compares the raw peak plus pre-assignment scheduler commitment with the requested budget.
 - `job_io_read_transfer_bytes`, `job_io_write_transfer_bytes`, and `job_io_other_transfer_bytes`: cumulative Windows Job Object I/O transfer counters. They include processes that have exited. These are **not physical disk-only bytes**; model loads, raster I/O, pipes, and other I/O may contribute.
 - The attention path separately reports the sizes of its disk-backed staging arrays and output. Other schedules still need a peak temporary-storage measurement.
 

@@ -64,6 +64,7 @@ for family, model in (
     assert report["memory_limit_enforced"] is True
     assert report["gdal_cachemax_mib"] == 16
     assert report["job_peak_working_set_sampled_bytes"] > 0
+    assert report["job_peak_private_commit_sampled_bytes"] <= 128*1024*1024
     assert report["working_set_sample_count"] > 0
     assert report["job_io_read_transfer_bytes"] >= 0
     assert report["job_io_write_transfer_bytes"] >= 0
@@ -102,6 +103,7 @@ attention_report = json.loads(attention_output.with_suffix(".report.json").read_
 assert attention_report["strategy"] == "auto-block_attention"
 assert attention_report["gdal_cachemax_mib"] == 16
 assert attention_report["job_peak_working_set_sampled_bytes"] > 0
+assert attention_report["job_peak_private_commit_sampled_bytes"] <= 128*1024*1024
 assert attention_report["working_set_sample_count"] > 0
 assert attention_report["job_peak_conservative_upper_bound_bytes"] <= 128*1024*1024
 print(f"block_attention: max_abs={error:.3g}")

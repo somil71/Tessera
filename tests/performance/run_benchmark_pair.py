@@ -129,6 +129,11 @@ def run(args):
                            reported_seconds=report.get("total_elapsed_seconds",
                                                        report.get("elapsed_seconds")),
                            peak_job_commit_bytes=report.get("job_peak_committed_bytes"),
+                           peak_private_commit_sampled_bytes=report.get(
+                               "job_peak_private_commit_sampled_bytes"),
+                           peak_counter_exceeds_budget=report.get(
+                               "job_peak_counter_exceeds_budget"),
+                           enforced_job_limit_bytes=report.get("job_enforced_limit_bytes"),
                            peak_job_working_set_sampled_bytes=report.get(
                                "job_peak_working_set_sampled_bytes"),
                            job_io_read_transfer_bytes=report.get("job_io_read_transfer_bytes"),
@@ -138,13 +143,23 @@ def run(args):
                 if (report.get("memory_limit_enforced") is not True or
                         report.get("memory_limit_bytes") != cap or
                         run["conservative_peak_bytes"] is None or
-                        run["conservative_peak_bytes"] > cap):
+                        run["enforced_job_limit_bytes"] is None or
+                        run["enforced_job_limit_bytes"] > cap or
+                        run["peak_private_commit_sampled_bytes"] is None or
+                        run["peak_private_commit_sampled_bytes"] > cap):
                     run["validation_error"] = "job-wide memory evidence failed"
                 elif (not isinstance(run["peak_job_working_set_sampled_bytes"], int) or
                       run["peak_job_working_set_sampled_bytes"] <= 0 or
                       not isinstance(run["job_io_read_transfer_bytes"], int) or
                       not isinstance(run["job_io_write_transfer_bytes"], int)):
                     run["validation_error"] = "job resource accounting is missing"
+                elif (run["peak_counter_exceeds_budget"] is True and
+                      not any(item.get("status") == "failed" for item in
+                              report.get("planning_candidates", [])) and
+                      not report.get("failed_execution_attempts")):
+                    run["validation_error"] = (
+                        "raw job peak counter exceeded the cap without a recorded failed attempt"
+                    )
             else:
                 run["validation_error"] = "runner failed or omitted output/report"
             pair["runs"][method] = run

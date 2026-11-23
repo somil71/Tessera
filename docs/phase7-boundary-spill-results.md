@@ -1,6 +1,6 @@
 # Graph-boundary disk spill experiment
 
-The Rust `run-split` command can now write its FP32 or INT64 graph-boundary tensors to temporary files, release the head ONNX Runtime session and input tensor, load the tail session, and then reload the boundary. It deletes those files on normal completion or an ordinary error. The command reports spill bytes and process memory. This is a real store-to-disk choice at a graph cut, but **it is not yet available to the automatic GeoTIFF planner**.
+The Rust `run-split` command can write its FP32 or INT64 graph-boundary tensors to temporary files, release the head ONNX Runtime session and input tensor, load the tail session, and then reload the boundary. It deletes those files on normal completion or an ordinary error. The command reports spill bytes and process memory. This experiment preceded [U-Net raster planner integration](phase8-storage-planner-results.md).
 
 `tests/fixtures/smoke_rust_execution.py` exercised every internal cut of the development U-Net, global-mean, and exposed attention fixtures in both memory and disk modes. All 16 disk-spill outputs were identical to the in-memory split outputs and whole-model ONNX Runtime references on the smoke inputs. The test also checked that temporary directories were removed.
 

@@ -1,6 +1,6 @@
 # Frozen feasibility and evaluation protocol
 
-**Amendment:** The model historically named `attention_holdout.onnx` was exposed during development and is no longer eligible as unseen held-out evidence. See [evaluation amendment 1](evaluation-amendment-1.md). A new independent holdout is required before applying the decision rule below.
+**Amendments:** The model historically named `attention_holdout.onnx` was exposed during development and is no longer eligible as unseen held-out evidence. See [evaluation amendment 1](evaluation-amendment-1.md). [Evaluation amendment 2](evaluation-amendment-2.md) records how to interpret a Windows job peak counter that exceeds the enforced cap after failed allocation probes. A new independent holdout is required before applying the decision rule below.
 
 Frozen on 2026-11-22 before planner implementation. Changes to models, tolerances, baselines, or pass criteria must be versioned and accompanied by a new held-out evaluation. All times below refer to completed runs, including model load, planning, input reads, and output writes.
 

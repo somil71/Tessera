@@ -26,6 +26,8 @@ from run_raster_global_mean import (run as run_global_mean, transform,
                                     validate_reduction)
 from run_raster_unet import Worker, run as run_unet, validate_model as validate_unet
 
+DISK_PROBE_MIN_EXPECTED_RUNTIME_SECONDS = 10.0
+
 
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -41,6 +43,8 @@ def arguments():
     parser.add_argument("--ort-dll", type=Path, default=DEFAULT_DLL)
     parser.add_argument("--max-tile-size", type=int, default=512,
                         help="Optional upper bound on automatic tile search")
+    parser.add_argument("--explore-spill", action="store_true",
+                        help="Profile larger disk-spill U-Net tiles even for short predicted RAM runs")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -113,17 +117,18 @@ def worker_shape_count(height, width, tile, family):
 
 
 def profile_candidate(model, directory, family, tile, cut, channels, scores,
-                      height, width, exe, env, threads, job):
+                      height, width, exe, env, threads, job, storage_mode="memory"):
     shape = ((min(height, tile+8), min(width, tile+8))
              if family == "local_unet" else (tile, tile))
-    candidate = dict(tile_size=tile, cut_after=cut, probe_shape=list(shape),
+    candidate = dict(tile_size=tile, cut_after=cut, storage_mode=storage_mode,
+                     probe_shape=list(shape),
                      tile_count=math.ceil(height/tile)*math.ceil(width/tile),
                      worker_shape_count=worker_shape_count(height, width, tile, family))
     worker = None
     try:
         startup = time.perf_counter()
         worker = Worker(exe, env, model, directory, shape, cut,
-                        channels, threads, job)
+                        channels, threads, job, storage_mode)
         startup_ms = (time.perf_counter()-startup)*1000
         tile_data = np.zeros((channels, *shape), dtype=np.float32)
         worker.infer(tile_data, scores)
@@ -138,6 +143,10 @@ def profile_candidate(model, directory, family, tile, cut, channels, scores,
         candidate.update(status="ok", startup_ms=startup_ms,
                          median_probe_ms=inference_ms,
                          child_peak_commit_bytes=int(metric["peak_commit_bytes"]),
+                         probe_spill_write_bytes=int(metric.get("spill_write_bytes", 0)),
+                         probe_spill_read_bytes=int(metric.get("spill_read_bytes", 0)),
+                         probe_spill_peak_storage_bytes=int(
+                             metric.get("spill_peak_storage_bytes", 0)),
                          separate_peak_upper_bound_bytes=upper,
                          predicted_execution_seconds=(
                              candidate["tile_count"]*inference_ms/1000
@@ -149,6 +158,24 @@ def profile_candidate(model, directory, family, tile, cut, channels, scores,
         if worker is not None:
             worker.close()
     return candidate
+
+
+def rank_candidates(feasible):
+    fastest = min(trial["predicted_execution_seconds"] for trial in feasible)
+    near = sorted(
+        (trial for trial in feasible
+         if trial["predicted_execution_seconds"] <= 1.10*fastest),
+        key=lambda trial: (-trial["tile_size"],
+                           trial["predicted_execution_seconds"],
+                           trial["separate_peak_upper_bound_bytes"]),
+    )
+    slower = sorted(
+        (trial for trial in feasible
+         if trial["predicted_execution_seconds"] > 1.10*fastest),
+        key=lambda trial: (trial["predicted_execution_seconds"],
+                           trial["separate_peak_upper_bound_bytes"]),
+    )
+    return near + slower
 
 
 def run(args):
@@ -222,59 +249,87 @@ def run(args):
         cuts = range(len(model.graph.node)-1)
         if family == "global_mean":
             cuts = (0,)
-        for tile in tiles:
-            for cut in cuts:
-                directory = work / f"tile_{tile}_cut_{cut}"
-                result = profile_candidate(probe_model, directory, family, tile,
-                                           cut, channels, scores, height, width,
-                                           exe, env, args.threads, job)
-                trials.append(result)
-        feasible = [trial for trial in trials if trial["status"] == "ok"]
-        if not feasible:
-            raise RuntimeError("no tile/cut candidate completed under the memory budget")
-        fastest = min(trial["predicted_execution_seconds"] for trial in feasible)
-        near = sorted(
-            (trial for trial in feasible
-             if trial["predicted_execution_seconds"] <= 1.10*fastest),
-            key=lambda trial: (-trial["tile_size"],
-                               trial["predicted_execution_seconds"],
-                               trial["separate_peak_upper_bound_bytes"]),
-        )
-        slower = sorted(
-            (trial for trial in feasible
-             if trial["predicted_execution_seconds"] > 1.10*fastest),
-            key=lambda trial: (trial["predicted_execution_seconds"],
-                               trial["separate_peak_upper_bound_bytes"]),
-        )
-        feasible = near + slower
-        for candidate in feasible:
-            run_args = copy.copy(args)
-            run_args.tile_size = candidate["tile_size"]
-            run_args.cut_after = candidate["cut_after"]
-            run_args.worker_mode = "pipe"
-            try:
-                if family == "pointwise":
-                    run_pointwise(run_args, external_job=job)
-                elif family == "local_unet":
-                    run_unet(run_args, external_job=job)
+        probed_disk_tiles = set()
+        attempted_plans = set()
+        rounds = 2 if family == "local_unet" else 1
+        for round_index in range(rounds):
+            if round_index == 0:
+                for tile in tiles:
+                    for cut in cuts:
+                        directory = work / f"tile_{tile}_cut_{cut}"
+                        trials.append(profile_candidate(
+                            probe_model, directory, family, tile, cut, channels,
+                            scores, height, width, exe, env, args.threads, job,
+                            "memory"))
+                if family == "local_unet":
+                    ram_ok = [trial for trial in trials if trial["status"] == "ok"]
+                    best_ram = (min(ram_ok, key=lambda trial:
+                                trial["predicted_execution_seconds"])
+                                if ram_ok else None)
+                    if best_ram is None:
+                        disk_tiles = list(tiles)
+                    elif (args.explore_spill or
+                          best_ram["predicted_execution_seconds"] >=
+                          DISK_PROBE_MIN_EXPECTED_RUNTIME_SECONDS):
+                        disk_tiles = [tile for tile in tiles
+                                      if tile > best_ram["tile_size"]]
+                    else:
+                        disk_tiles = []
                 else:
-                    run_global_mean(run_args, external_job=job)
-                selected = candidate
+                    disk_tiles = []
+            else:
+                # A probe may pass while the full GeoTIFF fails under the cap.
+                # In that case, search all remaining U-Net spill tiles.
+                disk_tiles = [tile for tile in tiles if tile not in probed_disk_tiles]
+            for tile in disk_tiles:
+                probed_disk_tiles.add(tile)
+                for cut in cuts:
+                    directory = work / f"tile_{tile}_cut_{cut}"
+                    trials.append(profile_candidate(
+                        probe_model, directory, family, tile, cut, channels,
+                        scores, height, width, exe, env, args.threads, job,
+                        "disk"))
+            feasible = [trial for trial in trials
+                        if trial["status"] == "ok" and
+                        (trial["storage_mode"], trial["tile_size"],
+                         trial["cut_after"]) not in attempted_plans]
+            for candidate in rank_candidates(feasible) if feasible else []:
+                attempted_plans.add((candidate["storage_mode"],
+                                     candidate["tile_size"], candidate["cut_after"]))
+                run_args = copy.copy(args)
+                run_args.tile_size = candidate["tile_size"]
+                run_args.cut_after = candidate["cut_after"]
+                run_args.worker_mode = "pipe"
+                run_args.storage_mode = candidate["storage_mode"]
+                try:
+                    if family == "pointwise":
+                        run_pointwise(run_args, external_job=job)
+                    elif family == "local_unet":
+                        run_unet(run_args, external_job=job)
+                    else:
+                        run_global_mean(run_args, external_job=job)
+                    selected = candidate
+                    break
+                except Exception as exc:
+                    attempts.append(dict(tile_size=candidate["tile_size"],
+                                         cut_after=candidate["cut_after"],
+                                         storage_mode=candidate["storage_mode"],
+                                         error=str(exc)))
+                    failure_path = output.with_suffix(".failure.json")
+                    if failure_path.exists():
+                        failure = json.loads(failure_path.read_text(encoding="utf-8"))
+                        if failure.get("output_published"):
+                            raise RuntimeError("execution published output before failing; see failure report") from exc
+            if selected is not None:
                 break
-            except Exception as exc:
-                attempts.append(dict(tile_size=candidate["tile_size"],
-                                     cut_after=candidate["cut_after"], error=str(exc)))
-                failure_path = output.with_suffix(".failure.json")
-                if failure_path.exists():
-                    failure = json.loads(failure_path.read_text(encoding="utf-8"))
-                    if failure.get("output_published"):
-                        raise RuntimeError("execution published output before failing; see failure report") from exc
         if selected is None:
-            raise RuntimeError("all profiled plans failed during complete-raster execution")
+            if any(trial["status"] == "ok" for trial in trials):
+                raise RuntimeError("all profiled plans failed during complete-raster execution")
+            raise RuntimeError("no tile/cut/storage candidate completed under the memory budget")
         report_path = output.with_suffix(".report.json")
         report = json.loads(report_path.read_text(encoding="utf-8"))
         report.update(strategy=f"auto-{family}",
-                      selection_rule="Within 10% predicted runtime, prefer fewer tiles",
+                      selection_rule="Profile RAM plans; if the fastest predicted RAM run is at least 10 s, profile larger U-Net spill tiles. Rank measured plans by predicted runtime; within 10%, prefer fewer tiles. If all full runs fail, profile remaining spill tiles",
                       planning_seconds=time.perf_counter()-started-report["elapsed_seconds"],
                       total_elapsed_seconds=time.perf_counter()-started,
                       selected_plan=selected,
@@ -285,7 +340,8 @@ def run(args):
         report.update(job.resource_snapshot())
         report_path.write_text(json.dumps(report, indent=2)+"\n", encoding="utf-8")
         output.with_suffix(".plan.failure.json").unlink(missing_ok=True)
-        print(f"auto plan: {family}, tile {selected['tile_size']}, cut {selected['cut_after']}; "
+        print(f"auto plan: {family}, tile {selected['tile_size']}, cut {selected['cut_after']}, "
+              f"storage {selected['storage_mode']}; "
               f"{len(trials)} candidates")
     except Exception as exc:
         failure = dict(status="failed", error=str(exc), family=family,

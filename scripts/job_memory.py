@@ -144,6 +144,7 @@ class JobMemoryLimit:
         self.psapi = psapi
         self.working_set_sample_interval_seconds = 0.05
         self.peak_working_set_sampled_bytes = 0
+        self.peak_private_commit_sampled_bytes = 0
         self.working_set_sample_count = 0
         self.working_set_incomplete_samples = 0
         self._sampler_stop = threading.Event()
@@ -225,7 +226,8 @@ class JobMemoryLimit:
             return [int(ids[index]) for index in range(header.returned)]
 
     def _sample_working_set(self):
-        total = 0
+        total_working_set = 0
+        total_private_commit = 0
         incomplete = False
         current_pid = os.getpid()
         for pid in self._process_ids():
@@ -240,14 +242,17 @@ class JobMemoryLimit:
                 counters.cb = ctypes.sizeof(counters)
                 if self.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters),
                                                    counters.cb):
-                    total += int(counters.working_set_size)
+                    total_working_set += int(counters.working_set_size)
+                    total_private_commit += int(counters.private_usage)
                 else:
                     incomplete = True
             finally:
                 if not current:
                     self.kernel.CloseHandle(handle)
         self.peak_working_set_sampled_bytes = max(self.peak_working_set_sampled_bytes,
-                                                  total)
+                                                  total_working_set)
+        self.peak_private_commit_sampled_bytes = max(
+            self.peak_private_commit_sampled_bytes, total_private_commit)
         self.working_set_sample_count += 1
         self.working_set_incomplete_samples += int(incomplete)
 
@@ -262,6 +267,13 @@ class JobMemoryLimit:
         self._sample_working_set()
         io = self.io_transfer_bytes()
         return dict(job_peak_working_set_sampled_bytes=self.peak_working_set_sampled_bytes,
+                    job_peak_private_commit_sampled_bytes=(
+                        self.peak_private_commit_sampled_bytes),
+                    job_peak_counter_exceeds_budget=(
+                        self.peak_job_bytes() > self.job_limit_bytes),
+                    job_peak_conservative_exceeds_budget=(
+                        self.conservative_peak_bytes() > self.budget_bytes),
+                    job_enforced_limit_bytes=self.job_limit_bytes,
                     working_set_sample_interval_ms=int(
                         self.working_set_sample_interval_seconds * 1000),
                     working_set_sample_count=self.working_set_sample_count,

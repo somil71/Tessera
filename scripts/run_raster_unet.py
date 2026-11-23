@@ -34,6 +34,7 @@ def arguments():
     parser.add_argument("--cut-after", type=int, default=4)
     parser.add_argument("--tile-size", type=int, default=256)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--storage-mode", choices=("memory", "disk"), default="memory")
     parser.add_argument("--memory-limit-mib", type=int,
                         help="Enforce a Windows job-wide committed-memory budget")
     parser.add_argument("--band-order", help="Comma-separated 1-based source band indexes")
@@ -141,16 +142,24 @@ def validate_model(path):
 
 class Worker:
     def __init__(self, exe, env, model, directory, shape, cut, channels, threads,
-                 job=None):
+                 job=None, storage_mode="memory"):
         self.height, self.width = shape
         self.directory = directory
+        self.exe, self.env, self.channels, self.threads = exe, env, channels, threads
+        self.job, self.storage_mode = job, storage_mode
         directory.mkdir()
         self.head = directory / "head.onnx"
         self.tail = directory / "tail.onnx"
+        self.tile_input = directory / "tile.f32"
+        self.tile_output = directory / "scores.f32"
         self.process = None
         try:
             execute([exe, "split", model, "--cut-after", str(cut), "--height",
                      str(self.height), "--width", str(self.width), "--out-dir", directory], env, job)
+            if storage_mode == "disk":
+                return
+            if storage_mode != "memory":
+                raise ValueError(f"unknown boundary storage mode: {storage_mode}")
             self.process = subprocess.Popen(
                 [exe, *(["--await-start"] if job is not None else []),
                  "serve-split-pipe", self.head, self.tail, "--channels", str(channels),
@@ -183,6 +192,24 @@ class Worker:
             raise
 
     def infer(self, tile, output_channels):
+        if self.storage_mode == "disk":
+            np.ascontiguousarray(tile, dtype="<f4").tofile(self.tile_input)
+            stdout = execute(
+                [self.exe, "run-split", self.head, self.tail,
+                 "--input-f32", self.tile_input, "--output-f32", self.tile_output,
+                 "--channels", str(self.channels), "--height", str(self.height),
+                 "--width", str(self.width), "--threads", str(self.threads),
+                 "--spill-boundary", "--spill-dir", self.directory],
+                self.env, self.job,
+            )
+            metrics = next(line for line in stdout.splitlines()
+                           if line.startswith("mode=split"))
+            metric = dict(part.split("=", 1) for part in metrics.split())
+            expected = output_channels * self.height * self.width
+            scores = np.fromfile(self.tile_output, dtype="<f4")
+            if scores.size != expected:
+                raise ValueError("Rust worker returned wrong output size")
+            return scores.reshape(output_channels, self.height, self.width), metric
         payload = np.ascontiguousarray(tile, dtype="<f4").tobytes()
         self.process.stdin.write((json.dumps({"input_bytes": len(payload)}) + "\n").encode() + payload)
         self.process.stdin.flush()
@@ -199,15 +226,23 @@ class Worker:
         return scores.reshape(output_channels, self.height, self.width), metric
 
     def close(self):
-        if self.process.poll() is None:
-            self.process.stdin.close()
-            try:
-                self.process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.process.terminate()
-                self.process.wait(timeout=5)
-        self.process.stdout.close()
-        self.process.stderr.close()
+        if self.process is not None:
+            if self.process.poll() is None:
+                self.process.stdin.close()
+                try:
+                    self.process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self.process.terminate()
+                    self.process.wait(timeout=5)
+            self.process.stdout.close()
+            self.process.stderr.close()
+        self.tile_input.unlink(missing_ok=True)
+        self.tile_output.unlink(missing_ok=True)
+        for spill_dir in self.directory.glob(".raster-compiler-spill-*"):
+            if spill_dir.is_dir():
+                for boundary in spill_dir.glob("boundary_*.bin"):
+                    boundary.unlink(missing_ok=True)
+                spill_dir.rmdir()
         self.head.unlink(missing_ok=True)
         self.tail.unlink(missing_ok=True)
         self.directory.rmdir()
@@ -252,6 +287,9 @@ def run(args, external_job=None):
     shapes = {}
     peak_child = 0
     peak_scheduler = 0
+    spill_written = 0
+    spill_read = 0
+    spill_peak_storage = 0
     tiles = 0
     try:
         if job is None and args.memory_limit_mib is not None:
@@ -289,7 +327,8 @@ def run(args, external_job=None):
                 for shape, jobs in shapes.items():
                     worker = Worker(exe, env, model,
                         work / f"shape_{shape[0]}x{shape[1]}", shape,
-                        args.cut_after, channels, args.threads, job)
+                        args.cut_after, channels, args.threads, job,
+                        getattr(args, "storage_mode", "memory"))
                     for row, col, core_h, core_w, top, left in jobs:
                         window = Window(left, top, shape[1], shape[0])
                         if np.any(src.read_masks(window=window) != 255):
@@ -300,6 +339,10 @@ def run(args, external_job=None):
                         tile = tile * args.scale + args.offset
                         scores, metric = worker.infer(tile, output_channels)
                         peak_child = max(peak_child, int(metric["peak_commit_bytes"]))
+                        spill_written += int(metric.get("spill_write_bytes", 0))
+                        spill_read += int(metric.get("spill_read_bytes", 0))
+                        spill_peak_storage = max(spill_peak_storage,
+                            int(metric.get("spill_peak_storage_bytes", 0)))
                         dst.write(scores[:, row-top:row-top+core_h, col-left:col-left+core_w],
                                   window=Window(col, row, core_w, core_h))
                         peak_scheduler = max(peak_scheduler, own_peak_commit_bytes())
@@ -314,7 +357,12 @@ def run(args, external_job=None):
                       gdal_cachemax_mib=gdal_cachemax_mib,
                       tile_count=tiles, halo_pixels=4, alignment_pixels=2,
                       worker_shapes=[list(shape) for shape in shapes],
-                      cut_after=args.cut_after, band_order=bands,
+                      cut_after=args.cut_after,
+                      boundary_storage=getattr(args, "storage_mode", "memory"),
+                      boundary_spill_write_bytes=spill_written,
+                      boundary_spill_read_bytes=spill_read,
+                      boundary_spill_peak_storage_bytes=spill_peak_storage,
+                      band_order=bands,
                       scale=args.scale, offset=args.offset,
                       elapsed_seconds=time.perf_counter()-started,
                       max_child_peak_commit_bytes=peak_child,

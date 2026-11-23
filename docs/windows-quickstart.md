@@ -27,7 +27,7 @@ For a supported ONNX model and georeferenced GeoTIFF, run preflight and then aut
   --threads 4
 ```
 
-Add `--band-order 3,2,1`, `--scale`, or `--offset` only when those values match the model's declared preprocessing. The output is a georeferenced FP32 score GeoTIFF, with `runs\scores.report.json` beside it. Inspect `strategy`, `selected_plan`, `memory_limit_enforced`, `job_peak_conservative_upper_bound_bytes`, `memory_limit_bytes`, `total_elapsed_seconds`, and the [resource-accounting fields](runtime-resource-accounting.md). The doctor verifies basic compatibility and available disk space; it does **not** prove a feasible schedule, numerical correctness, or a model's intended whole-image behavior.
+Add `--band-order 3,2,1`, `--scale`, or `--offset` only when those values match the model's declared preprocessing. The output is a georeferenced FP32 score GeoTIFF, with `runs\scores.report.json` beside it. Inspect `strategy`, `selected_plan`, `memory_limit_enforced`, `job_enforced_limit_bytes`, `job_peak_committed_bytes`, `job_peak_private_commit_sampled_bytes`, `memory_limit_bytes`, `total_elapsed_seconds`, and the [resource-accounting fields](runtime-resource-accounting.md). The doctor verifies basic compatibility and available disk space; it does **not** prove a feasible schedule, numerical correctness, or a model's intended whole-image behavior.
 
 If the run cannot plan or execute within the cap, inspect `runs\scores.plan.failure.json` and any `runs\scores.failure.json`. The runner should not publish a partial score raster as a completed result. Supported model patterns and their limits are in the [v1 contract](v1-contract.md) and [development status](development-status.md). To check the installation with the repository's engineering fixtures:
 
@@ -36,6 +36,7 @@ If the run cannot plan or execute within the cap, inspect `runs\scores.plan.fail
 .\.venv\Scripts\python.exe tests\fixtures\create_pointwise_model.py
 cargo test
 .\.venv\Scripts\python.exe tests\fixtures\smoke_auto_raster.py
+.\.venv\Scripts\python.exe tests\fixtures\smoke_storage_planner.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_job_memory.py
 ```
 
