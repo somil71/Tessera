@@ -87,6 +87,32 @@ enum Command {
         #[arg(long, default_value_t = 4)]
         threads: usize,
     },
+    /// Keep split-model sessions loaded and execute JSON-line tile requests.
+    ServeSplit {
+        head: PathBuf,
+        tail: PathBuf,
+        #[arg(long)]
+        channels: usize,
+        #[arg(long)]
+        height: usize,
+        #[arg(long)]
+        width: usize,
+        #[arg(long, default_value_t = 4)]
+        threads: usize,
+    },
+    /// Keep split-model sessions loaded and exchange tile data over pipes.
+    ServeSplitPipe {
+        head: PathBuf,
+        tail: PathBuf,
+        #[arg(long)]
+        channels: usize,
+        #[arg(long)]
+        height: usize,
+        #[arg(long)]
+        width: usize,
+        #[arg(long, default_value_t = 4)]
+        threads: usize,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -146,6 +172,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 threads,
             },
         )?,
+        Command::ServeSplit {
+            head,
+            tail,
+            channels,
+            height,
+            width,
+            threads,
+        } => execute::serve_split(&head, &tail, channels, height, width, threads)?,
+        Command::ServeSplitPipe {
+            head,
+            tail,
+            channels,
+            height,
+            width,
+            threads,
+        } => execute::serve_split_pipe(&head, &tail, channels, height, width, threads)?,
     }
 
     Ok(())

@@ -86,6 +86,11 @@ for tile_size, band_order, scale, offset in (
         (53 + tile_size - 1) // tile_size
     )
     assert report["max_child_peak_commit_bytes"] > 0
+    assert report["worker_mode"] == "pipe"
+    assert report["raw_bridge_bytes"] == 0
+    assert report["combined_process_peak_upper_bound_bytes"] >= report[
+        "max_child_peak_commit_bytes"
+    ]
     print(f"tile {tile_size}: {report['tile_count']} windows, max_abs={absolute_error:.3g}")
 
 bad_source = OUT / "input_with_nodata.tif"

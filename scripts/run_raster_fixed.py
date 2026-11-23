@@ -5,12 +5,18 @@ This is a bounded development path, not the memory-limited planner.
 """
 
 import argparse
+import ctypes
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
 import subprocess
 import time
 from uuid import uuid4
+
+# Raster window assembly does not use BLAS. Prevent OpenBLAS from reserving
+# hundreds of megabytes for its default thread pool before NumPy is imported.
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 import numpy as np
 import onnx
@@ -34,6 +40,9 @@ def arguments():
     parser.add_argument("--cut-after", type=int, required=True)
     parser.add_argument("--tile-size", type=int, default=256)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument(
+        "--worker-mode", choices=("pipe", "persistent", "fresh"), default="pipe"
+    )
     parser.add_argument("--band-order", help="Comma-separated 1-based source band indexes")
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--offset", type=float, default=0.0)
@@ -102,6 +111,59 @@ def execute(command, env):
     return result.stdout
 
 
+def read_exact(stream, count):
+    chunks = []
+    remaining = count
+    while remaining:
+        chunk = stream.read(remaining)
+        if not chunk:
+            raise ValueError(f"Rust worker returned only {count - remaining} of {count} bytes")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+@lru_cache(maxsize=1)
+def memory_api():
+    class Counters(ctypes.Structure):
+        _fields_ = [
+            ("cb", ctypes.c_ulong),
+            ("page_fault_count", ctypes.c_ulong),
+            ("peak_working_set_size", ctypes.c_size_t),
+            ("working_set_size", ctypes.c_size_t),
+            ("quota_peak_paged_pool_usage", ctypes.c_size_t),
+            ("quota_paged_pool_usage", ctypes.c_size_t),
+            ("quota_peak_non_paged_pool_usage", ctypes.c_size_t),
+            ("quota_non_paged_pool_usage", ctypes.c_size_t),
+            ("pagefile_usage", ctypes.c_size_t),
+            ("peak_pagefile_usage", ctypes.c_size_t),
+            ("private_usage", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    psapi.GetProcessMemoryInfo.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(Counters),
+        ctypes.c_ulong,
+    ]
+    psapi.GetProcessMemoryInfo.restype = ctypes.c_int
+    return Counters, kernel32, psapi
+
+
+def own_peak_commit_bytes():
+    """Return this Python process's lifetime peak committed bytes on Windows."""
+    Counters, kernel32, psapi = memory_api()
+    counters = Counters()
+    counters.cb = ctypes.sizeof(Counters)
+    if not psapi.GetProcessMemoryInfo(
+        kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+    ):
+        raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
+    return int(counters.peak_pagefile_usage)
+
+
 def run(args):
     started = time.perf_counter()
     model = args.model.resolve(strict=True)
@@ -131,7 +193,9 @@ def run(args):
     tail = work / "tail.onnx"
     tiles = 0
     max_child_commit = 0
+    max_scheduler_commit = 0
     raw_bridge_bytes = 0
+    worker = None
     try:
         execute(
             [
@@ -149,6 +213,35 @@ def run(args):
             ],
             env,
         )
+        if args.worker_mode in {"persistent", "pipe"}:
+            worker = subprocess.Popen(
+                [
+                    exe,
+                    "serve-split-pipe" if args.worker_mode == "pipe" else "serve-split",
+                    head,
+                    tail,
+                    "--channels",
+                    str(input_channels),
+                    "--height",
+                    str(args.tile_size),
+                    "--width",
+                    str(args.tile_size),
+                    "--threads",
+                    str(args.threads),
+                ],
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=args.worker_mode != "pipe",
+                bufsize=0 if args.worker_mode == "pipe" else 1,
+            )
+            ready_line = worker.stdout.readline()
+            if not ready_line:
+                raise RuntimeError(f"Rust worker failed to start: {worker.stderr.read()}")
+            ready = json.loads(ready_line)
+            if ready.get("ready") is not True:
+                raise RuntimeError(f"unexpected Rust worker response: {ready}")
         with rasterio.open(source) as src:
             if src.crs is None:
                 raise ValueError("input GeoTIFF has no CRS")
@@ -191,43 +284,91 @@ def run(args):
                             (input_channels, args.tile_size, args.tile_size), dtype=np.float32
                         )
                         tile[:, :height, :width] = actual * args.scale + args.offset
-                        tile.tofile(tile_input)
-                        stdout = execute(
-                            [
-                                exe,
-                                "run-split",
-                                head,
-                                tail,
-                                "--input-f32",
-                                tile_input,
-                                "--output-f32",
-                                tile_output,
-                                "--channels",
-                                str(input_channels),
-                                "--height",
-                                str(args.tile_size),
-                                "--width",
-                                str(args.tile_size),
-                                "--threads",
-                                str(args.threads),
-                            ],
-                            env,
-                        )
-                        metrics = next(
-                            line for line in stdout.splitlines() if line.startswith("mode=split")
-                        )
-                        metric = dict(part.split("=", 1) for part in metrics.split())
-                        max_child_commit = max(
-                            max_child_commit, int(metric["peak_commit_bytes"])
-                        )
+                        if args.worker_mode == "pipe":
+                            payload = tile.astype("<f4", copy=False).tobytes(order="C")
+                            worker.stdin.write(
+                                (json.dumps({"input_bytes": len(payload)}) + "\n").encode()
+                                + payload
+                            )
+                            worker.stdin.flush()
+                            line = worker.stdout.readline()
+                            if not line:
+                                raise RuntimeError(
+                                    f"Rust worker stopped: {worker.stderr.read().decode(errors='replace')}"
+                                )
+                            metric = json.loads(line)
+                            if metric.get("ok") is not True:
+                                raise RuntimeError(f"Rust worker failed: {metric.get('error')}")
+                            expected_bytes = output_channels * args.tile_size * args.tile_size * 4
+                            if metric["output_bytes"] != expected_bytes:
+                                raise ValueError(
+                                    f"Rust announced {metric['output_bytes']} output bytes, expected {expected_bytes}"
+                                )
+                            output_data = read_exact(worker.stdout, expected_bytes)
+                            scores = np.frombuffer(output_data, dtype="<f4")
+                        elif worker is None:
+                            tile.tofile(tile_input)
+                            stdout = execute(
+                                [
+                                    exe,
+                                    "run-split",
+                                    head,
+                                    tail,
+                                    "--input-f32",
+                                    tile_input,
+                                    "--output-f32",
+                                    tile_output,
+                                    "--channels",
+                                    str(input_channels),
+                                    "--height",
+                                    str(args.tile_size),
+                                    "--width",
+                                    str(args.tile_size),
+                                    "--threads",
+                                    str(args.threads),
+                                ],
+                                env,
+                            )
+                            metrics = next(
+                                line
+                                for line in stdout.splitlines()
+                                if line.startswith("mode=split")
+                            )
+                            metric = dict(part.split("=", 1) for part in metrics.split())
+                        else:
+                            tile.tofile(tile_input)
+                            worker.stdin.write(
+                                json.dumps(
+                                    {
+                                        "input_f32": str(tile_input),
+                                        "output_f32": str(tile_output),
+                                    }
+                                )
+                                + "\n"
+                            )
+                            worker.stdin.flush()
+                            line = worker.stdout.readline()
+                            if not line:
+                                raise RuntimeError(
+                                    f"Rust worker stopped: {worker.stderr.read()}"
+                                )
+                            metric = json.loads(line)
+                            if metric.get("ok") is not True:
+                                raise RuntimeError(f"Rust worker failed: {metric.get('error')}")
+                        max_child_commit = max(max_child_commit, int(metric["peak_commit_bytes"]))
                         expected = output_channels * args.tile_size * args.tile_size
-                        scores = np.fromfile(tile_output, dtype="<f4")
+                        if args.worker_mode != "pipe":
+                            scores = np.fromfile(tile_output, dtype="<f4")
                         if scores.size != expected:
                             raise ValueError(f"Rust produced {scores.size} scores, expected {expected}")
                         scores = scores.reshape(output_channels, args.tile_size, args.tile_size)
                         dst.write(scores[:, :height, :width], window=window)
                         tiles += 1
-                        raw_bridge_bytes += tile_input.stat().st_size + tile_output.stat().st_size
+                        if args.worker_mode != "pipe":
+                            raw_bridge_bytes += tile_input.stat().st_size + tile_output.stat().st_size
+                        max_scheduler_commit = max(
+                            max_scheduler_commit, own_peak_commit_bytes()
+                        )
         os.replace(temporary_output, output)
         report = {
             "model": str(model),
@@ -240,20 +381,34 @@ def run(args):
             "transform": list(src.transform),
             "tile_size": args.tile_size,
             "tile_count": tiles,
+            "worker_mode": args.worker_mode,
             "cut_after": args.cut_after,
             "band_order": bands,
             "scale": args.scale,
             "offset": args.offset,
             "elapsed_seconds": time.perf_counter() - started,
             "max_child_peak_commit_bytes": max_child_commit,
+            "scheduler_peak_commit_bytes": max_scheduler_commit,
+            "combined_process_peak_upper_bound_bytes": max_child_commit
+            + max_scheduler_commit,
             "raw_bridge_bytes": raw_bridge_bytes,
             "numerical_error": None,
             "memory_limit_enforced": False,
-            "notes": "Child peak excludes this Python raster scheduler; input/output bridge uses raw files.",
+            "notes": "The sum of separate process peaks is a conservative upper bound, not a measured simultaneous job-wide peak. Pipe mode keeps tile data in memory.",
         }
         report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(f"wrote {output} and {report_path}; {tiles} tiles")
     finally:
+        if worker is not None:
+            if worker.poll() is None:
+                worker.stdin.close()
+                try:
+                    worker.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    worker.terminate()
+                    worker.wait(timeout=5)
+            worker.stdout.close()
+            worker.stderr.close()
         temporary_output.unlink(missing_ok=True)
         for path in (tile_input, tile_output, head, tail):
             path.unlink(missing_ok=True)
