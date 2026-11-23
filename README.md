@@ -78,7 +78,7 @@ To choose a supported execution schedule automatically:
 .\.venv\Scripts\python.exe scripts\run_raster_auto.py --model models\evaluation\unet_dev.onnx --input data\input.tif --output runs\auto_scores.tif --memory-limit-mib 2048
 ```
 
-The report includes every calibrated candidate, the selected plan, and planning time. `--max-tile-size` optionally bounds the local-model search; no schedule parameter is required. For the validated attention fixture, the auto path uses blockwise softmax and rejects estimates above 30 minutes before staging raster data. The [alternated benchmark runner](docs/evaluation-runner.md) records first-run and repeated automatic/manual comparisons; the required tuned independent evaluation remains unfinished.
+The report includes every calibrated candidate, the selected plan, and planning time. `--max-tile-size` optionally bounds the local-model search; no schedule parameter is required. For the validated attention fixture, the auto path uses blockwise softmax and rejects estimates above 30 minutes before staging raster data. [Runtime resource accounting](docs/runtime-resource-accounting.md) describes the enforced committed-memory peak, sampled working-set sum, and job I/O transfer counters. The [alternated benchmark runner](docs/evaluation-runner.md) records first-run and repeated automatic/manual comparisons; the required tuned independent evaluation remains unfinished.
 
 ## Build order
 

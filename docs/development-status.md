@@ -50,7 +50,7 @@ Two deterministic 8192×8192 three-band development GeoTIFFs now exercise the ac
 ## Remaining gaps
 
 - An empirical planner now chooses tile size and graph cut for the three fixed schedules. It does not choose keep/spill/recompute, estimate disk costs, or analyze arbitrary supported graphs. Its ranking must still be measured against the tuned baseline.
-- The fixed runners can optionally enforce a Windows Job Object committed-memory cap; the automatic CLI requires it. Job-wide peak working set is not yet measured.
+- The fixed runners can optionally enforce a Windows Job Object committed-memory cap; the automatic CLI requires it. Current reports include a 50 ms sampled sum of live job-process working sets and cumulative job I/O transfer bytes. The sampled working-set maximum can miss shorter peaks, and transfer bytes include more than physical disk activity. Exact peak working set and disk-only bytes remain open.
 - Raster execution has four validated patterns: pixelwise models, the development U-Net topology, first-node spatial global mean, and the exposed self-attention fixture. There is no generic receptive-field, global-operation, or transformer-graph analyzer. Unsupported models are rejected rather than silently miscomputed.
 - The default raster path has a persistent Rust worker and no raw tile bridge, but Python still owns GeoTIFF I/O. Large development runs exist, but repeated held-out performance results do not.
 - The output report has no numerical error estimate for an arbitrary user raster because a whole-image reference may not fit. The test harness calculates error on small reference cases.

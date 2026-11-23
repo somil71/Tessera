@@ -313,6 +313,8 @@ def run(args, external_job=None):
                           job.conservative_peak_bytes() if job else None),
                       raw_bridge_bytes=0, numerical_error=None,
                       memory_limit_enforced=job is not None)
+        if job is not None:
+            report.update(job.resource_snapshot())
         output.with_suffix(".report.json").write_text(json.dumps(report, indent=2)+"\n")
         failure_path.unlink(missing_ok=True)
         print(f"wrote {output}; {tiles} U-Net tiles")

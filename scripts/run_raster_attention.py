@@ -262,11 +262,12 @@ def run(args, external_job=None):
                       job_peak_committed_bytes=job.peak_job_bytes(),
                       job_peak_conservative_upper_bound_bytes=job.conservative_peak_bytes(),
                       scheduler_peak_commit_bytes=own_peak_commit_bytes(),
-                      job_peak_working_set_bytes=own_peak_working_set_bytes(),
+                      scheduler_peak_working_set_bytes=own_peak_working_set_bytes(),
                       input_staging_bytes=raw_bytes, score_staging_bytes=raw_bytes,
                       output_file_bytes=output_file_bytes,
                       peak_temp_storage_bytes=2*raw_bytes+output_file_bytes,
                       raster_read_windows=reads, numerical_error=None)
+        report.update(job.resource_snapshot())
         output.with_suffix(".report.json").write_text(
             json.dumps(report, indent=2)+"\n", encoding="utf-8"
         )

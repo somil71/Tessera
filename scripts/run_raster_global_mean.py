@@ -168,6 +168,7 @@ def run(args, external_job=None):
                       elapsed_seconds=time.perf_counter()-started,
                       job_peak_committed_bytes=job.peak_job_bytes(),
                       job_peak_conservative_upper_bound_bytes=job.conservative_peak_bytes())
+        report.update(job.resource_snapshot())
         report_path.write_text(json.dumps(report, indent=2)+"\n", encoding="utf-8")
         failure_path.unlink(missing_ok=True)
     except Exception as exc:

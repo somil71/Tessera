@@ -33,7 +33,13 @@ try:
     assert small_state["allocated"] is True
     _, large_state = attempt(64 * 1024 * 1024)
     assert large_state["allocated"] is False, large_state
+    resources = job.resource_snapshot()
+    assert resources["job_peak_working_set_sampled_bytes"] > 0
+    assert resources["working_set_sample_count"] >= 1
+    assert resources["job_io_read_transfer_bytes"] >= 0
+    assert resources["job_io_write_transfer_bytes"] >= 0
     print(f"job cap: {limit} bytes; child inherited: {inherited}; "
-          f"8 MiB accepted, 64 MiB rejected (Win32 error {large_state['error']})")
+          f"8 MiB accepted, 64 MiB rejected (Win32 error {large_state['error']}); "
+          f"sampled working set {resources['job_peak_working_set_sampled_bytes']} bytes")
 finally:
     job.close()

@@ -195,6 +195,7 @@ def run(args):
                           total_elapsed_seconds=time.perf_counter()-started,
                           job_peak_committed_bytes=job.peak_job_bytes(),
                           job_peak_conservative_upper_bound_bytes=job.conservative_peak_bytes())
+            report.update(job.resource_snapshot())
             report_path.write_text(json.dumps(report, indent=2)+"\n", encoding="utf-8")
             output.with_suffix(".plan.failure.json").unlink(missing_ok=True)
             print(f"auto plan: block attention {selected['query_block']}x{selected['key_block']}")
@@ -272,6 +273,7 @@ def run(args):
                       failed_execution_attempts=attempts,
                       job_peak_committed_bytes=job.peak_job_bytes(),
                       job_peak_conservative_upper_bound_bytes=job.conservative_peak_bytes())
+        report.update(job.resource_snapshot())
         report_path.write_text(json.dumps(report, indent=2)+"\n", encoding="utf-8")
         output.with_suffix(".plan.failure.json").unlink(missing_ok=True)
         print(f"auto plan: {family}, tile {selected['tile_size']}, cut {selected['cut_after']}; "

@@ -474,6 +474,8 @@ def run(args, external_job=None):
             "memory_limit_enforced": job is not None,
             "notes": "Separate process peaks are not simultaneous. The job counter measures the job-wide peak; its conservative upper bound adds pre-assignment scheduler commitment. Pipe mode keeps tile data in memory.",
         }
+        if job is not None:
+            report.update(job.resource_snapshot())
         report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         failure_path.unlink(missing_ok=True)
         print(f"wrote {output} and {report_path}; {tiles} tiles")

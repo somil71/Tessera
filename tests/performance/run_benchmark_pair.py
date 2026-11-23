@@ -129,6 +129,10 @@ def run(args):
                            reported_seconds=report.get("total_elapsed_seconds",
                                                        report.get("elapsed_seconds")),
                            peak_job_commit_bytes=report.get("job_peak_committed_bytes"),
+                           peak_job_working_set_sampled_bytes=report.get(
+                               "job_peak_working_set_sampled_bytes"),
+                           job_io_read_transfer_bytes=report.get("job_io_read_transfer_bytes"),
+                           job_io_write_transfer_bytes=report.get("job_io_write_transfer_bytes"),
                            conservative_peak_bytes=report.get(
                                "job_peak_conservative_upper_bound_bytes"))
                 if (report.get("memory_limit_enforced") is not True or
@@ -136,6 +140,11 @@ def run(args):
                         run["conservative_peak_bytes"] is None or
                         run["conservative_peak_bytes"] > cap):
                     run["validation_error"] = "job-wide memory evidence failed"
+                elif (not isinstance(run["peak_job_working_set_sampled_bytes"], int) or
+                      run["peak_job_working_set_sampled_bytes"] <= 0 or
+                      not isinstance(run["job_io_read_transfer_bytes"], int) or
+                      not isinstance(run["job_io_write_transfer_bytes"], int)):
+                    run["validation_error"] = "job resource accounting is missing"
             else:
                 run["validation_error"] = "runner failed or omitted output/report"
             pair["runs"][method] = run
