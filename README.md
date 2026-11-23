@@ -2,7 +2,7 @@
 
 Rust tooling for planning inference on images that exceed an available memory budget. The first target is CPU inference for ONNX vision models on large GeoTIFF rasters.
 
-The [v1 support contract](docs/v1-contract.md) and [frozen evaluation protocol](docs/evaluation-protocol.md) define the product and its acceptance test. The [evaluation amendment](docs/evaluation-amendment-1.md) records that the original attention holdout was exposed in development and must be replaced for the final evaluation. Phases 1–3 are complete as development milestones. A fixed, pixelwise-only GeoTIFF workflow is now available as a Phase 4 prototype. It defaults to a [persistent pipe worker](docs/phase4-worker-results.md) that keeps ONNX Runtime sessions loaded across windows. The [development status](docs/development-status.md) records what is complete, why it was built, what was measured, and what remains.
+The [v1 support contract](docs/v1-contract.md) and [frozen evaluation protocol](docs/evaluation-protocol.md) define the product and its acceptance test. The [evaluation amendment](docs/evaluation-amendment-1.md) records that the original attention holdout was exposed in development and must be replaced for the final evaluation. Phases 1–3 are complete as development milestones. Phase 4 now has fixed GeoTIFF schedules for pixelwise models and the [frozen local U-Net](docs/phase4-unet-results.md), both using a [persistent pipe worker](docs/phase4-worker-results.md). The [development status](docs/development-status.md) records what is complete, why it was built, what was measured, and what remains.
 
 ## Current state
 
@@ -43,6 +43,7 @@ cargo build
 .\.venv\Scripts\python.exe tests\benchmark_phase3.py
 .\.venv\Scripts\python.exe tests\fixtures\create_pointwise_model.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_raster.py
+.\.venv\Scripts\python.exe tests\fixtures\smoke_unet_raster.py
 ```
 
 Run the fixed raster prototype with a pixelwise ONNX model and a georeferenced GeoTIFF:
@@ -53,6 +54,14 @@ Run the fixed raster prototype with a pixelwise ONNX model and a georeferenced G
 
 The wrapper supports `--band-order 3,2,1`, `--scale`, and `--offset`. It rejects declared no-data and non-finite pixels. It writes a JSON report beside the output. The wrapper uses Rasterio 1.4.4; install all pinned Python dependencies with `.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt`.
 Use `--worker-mode persistent` to compare the file-backed worker or `--worker-mode fresh` for a fresh Rust process per tile. The default `pipe` mode writes no raw tile bridge files. The report records separate Python and Rust peak committed memory and their conservative sum; no job-wide cap is enforced yet.
+
+For the frozen U-Net topology and an even-size raster, run the fixed exact spatial schedule:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_raster_unet.py --model models\evaluation\unet_dev.onnx --input data\input.tif --output runs\unet_scores.tif --tile-size 256
+```
+
+This path validates the fixture topology, aligns tiles to the pool stride, reads a four-pixel halo, and clips halo windows at real image edges. It does not choose tile size or cut automatically.
 
 ## Build order
 
