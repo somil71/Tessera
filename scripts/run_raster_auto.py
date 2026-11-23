@@ -17,6 +17,8 @@ import onnx
 import rasterio
 
 from job_memory import JobMemoryLimit
+from run_raster_attention import (run as run_attention,
+                                  validate_model as validate_attention)
 from run_raster_fixed import (DEFAULT_DLL, DEFAULT_EXE, model_contract,
                               own_peak_commit_bytes, run as run_pointwise)
 from run_raster_global_mean import (run as run_global_mean, transform,
@@ -58,11 +60,15 @@ def model_family(model_path, model):
                     raise ValueError("output channel count must be fixed")
                 return "global_mean", channels, scores, mean_name
             except ValueError as global_error:
-                raise ValueError(
-                    "model does not match a supported raster schedule: "
-                    f"pointwise: {pointwise_error}; U-Net: {unet_error}; "
-                    f"global mean: {global_error}"
-                ) from global_error
+                try:
+                    channels = validate_attention(model)
+                    return "block_attention", channels, channels, None
+                except ValueError as attention_error:
+                    raise ValueError(
+                        "model does not match a supported raster schedule: "
+                        f"pointwise: {pointwise_error}; U-Net: {unet_error}; "
+                        f"global mean: {global_error}; attention: {attention_error}"
+                    ) from attention_error
 
 
 def candidate_tiles(height, width, maximum, family):
@@ -174,6 +180,23 @@ def run(args):
             bands = tuple(int(part) for part in args.band_order.split(","))
             if sorted(bands) != list(range(1, channels+1)):
                 raise ValueError("band order must permute source bands")
+        if family == "block_attention":
+            run_attention(args, external_job=job)
+            report_path = output.with_suffix(".report.json")
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            selected = dict(query_block=report["query_block"],
+                            key_block=report["key_block"],
+                            estimated_attention_seconds=report["estimated_attention_seconds"])
+            report.update(strategy="auto-block_attention", selected_plan=selected,
+                          planning_candidates=[selected],
+                          planning_seconds=report["pilot_seconds"],
+                          total_elapsed_seconds=time.perf_counter()-started,
+                          job_peak_committed_bytes=job.peak_job_bytes(),
+                          job_peak_conservative_upper_bound_bytes=job.conservative_peak_bytes())
+            report_path.write_text(json.dumps(report, indent=2)+"\n", encoding="utf-8")
+            output.with_suffix(".plan.failure.json").unlink(missing_ok=True)
+            print(f"auto plan: block attention {selected['query_block']}x{selected['key_block']}")
+            return
         exe = args.exe.resolve(strict=True)
         dll = args.ort_dll.resolve(strict=True)
         env = os.environ.copy()

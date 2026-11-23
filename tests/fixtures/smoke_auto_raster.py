@@ -69,6 +69,34 @@ for family, model in (
 
 print("automatic raster plans passed all three references")
 
+attention_model = ROOT / "models" / "evaluation" / "attention_holdout.onnx"
+attention_source = OUT / "attention_input.tif"
+attention_output = OUT / "block_attention.tif"
+attention_image = np.random.default_rng(4101).normal(size=(4, 8, 10)).astype(np.float32)
+with rasterio.open(attention_source, "w", driver="GTiff", width=10, height=8,
+                   count=4, dtype="float32", crs="EPSG:32643",
+                   transform=TRANSFORM) as dst:
+    dst.write(attention_image)
+attention_run = subprocess.run(
+    [PYTHON, RUNNER, "--model", attention_model, "--input", attention_source,
+     "--output", attention_output, "--memory-limit-mib", "128", "--overwrite"],
+    capture_output=True, text=True,
+)
+assert attention_run.returncode == 0, attention_run.stderr
+reference = ort.InferenceSession(attention_model, providers=["CPUExecutionProvider"]).run(
+    None, {"image": attention_image[np.newaxis]}
+)[0][0]
+with rasterio.open(attention_output) as raster:
+    actual = raster.read()
+    assert raster.crs == rasterio.crs.CRS.from_epsg(32643)
+    assert raster.transform == TRANSFORM
+error = float(np.max(np.abs(actual-reference)))
+assert error <= 1e-4
+attention_report = json.loads(attention_output.with_suffix(".report.json").read_text())
+assert attention_report["strategy"] == "auto-block_attention"
+assert attention_report["job_peak_conservative_upper_bound_bytes"] <= 128*1024*1024
+print(f"block_attention: max_abs={error:.3g}")
+
 small_output = OUT / "too_small.tif"
 small_output.unlink(missing_ok=True)
 failed = subprocess.run(

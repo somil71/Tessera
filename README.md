@@ -2,11 +2,11 @@
 
 Rust tooling for planning inference on images that exceed an available memory budget. The first target is CPU inference for ONNX vision models on large GeoTIFF rasters.
 
-The [v1 support contract](docs/v1-contract.md) and [frozen evaluation protocol](docs/evaluation-protocol.md) define the product and its acceptance test. The [evaluation amendment](docs/evaluation-amendment-1.md) records that the original attention holdout was exposed in development and must be replaced for the final evaluation. Phases 1–3 are complete as development milestones. Phase 4 has fixed GeoTIFF schedules for pixelwise models, the [frozen local U-Net](docs/phase4-unet-results.md), and the [global-mean fixture](docs/phase4-global-mean-results.md), using a [persistent pipe worker](docs/phase4-worker-results.md). A [Phase 5 calibration planner](docs/phase5-auto-plan-results.md) chooses tile size and graph cut for these schedules under a required memory cap. The [development status](docs/development-status.md) records what is complete, why it was built, what was measured, and what remains.
+The [v1 support contract](docs/v1-contract.md) and [frozen evaluation protocol](docs/evaluation-protocol.md) define the product and its acceptance test. The [evaluation amendment](docs/evaluation-amendment-1.md) records that the original attention holdout was exposed in development and must be replaced for the final evaluation. Phases 1–3 are complete as development milestones. Phase 4 has fixed GeoTIFF schedules for pixelwise models, the [frozen local U-Net](docs/phase4-unet-results.md), and the [global-mean fixture](docs/phase4-global-mean-results.md), using a [persistent pipe worker](docs/phase4-worker-results.md). Phase 5 adds [automatic tile and cut calibration](docs/phase5-auto-plan-results.md) and [blockwise attention](docs/phase5-attention-results.md) with a pre-run infeasibility estimate. The [development status](docs/development-status.md) records what is complete, why it was built, what was measured, and what remains.
 
 ## Current state
 
-The CLI loads an ONNX model, reports its input and output tensors, validates graph wiring, lists tensor producers and consumers, estimates tensor sizes for an image shape, and reports live tensors and their byte totals at every possible cut. It rejects inconsistent resolved output shapes and leaves unsupported shape patterns as `unknown`. Cut totals cover boundary tensors only; they are not peak process memory. The CLI can write two ONNX subgraphs at a chosen cut and execute them sequentially on a raw FP32 input. Python raster runners handle three validated model patterns and can enforce a Windows Job Object committed-memory cap. The automatic runner profiles tile sizes and graph cuts, then executes a feasible choice. It does not yet plan keep, spill, or recompute decisions.
+The CLI loads an ONNX model, reports its input and output tensors, validates graph wiring, lists tensor producers and consumers, estimates tensor sizes for an image shape, and reports live tensors and their byte totals at every possible cut. It rejects inconsistent resolved output shapes and leaves unsupported shape patterns as `unknown`. Cut totals cover boundary tensors only; they are not peak process memory. The CLI can write two ONNX subgraphs at a chosen cut and execute them sequentially on a raw FP32 input. Python raster runners handle four validated model patterns and enforce a Windows Job Object committed-memory cap when requested. The automatic runner profiles tile sizes and graph cuts for local models, then executes a feasible choice; its attention path estimates runtime and uses blockwise online softmax. It does not yet plan keep, spill, or recompute decisions.
 
 ```powershell
 cargo run -- inspect path\to\model.onnx
@@ -45,6 +45,7 @@ cargo build
 .\.venv\Scripts\python.exe tests\fixtures\smoke_raster.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_unet_raster.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_global_mean_raster.py
+.\.venv\Scripts\python.exe tests\fixtures\smoke_attention_raster.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_auto_raster.py
 ```
 
@@ -71,13 +72,13 @@ For the supported global-mean pattern, stream the reduction pass and execute the
 .\.venv\Scripts\python.exe scripts\run_raster_global_mean.py --model models\evaluation\global_mean_dev.onnx --input data\input.tif --output runs\global_scores.tif --tile-size 256 --memory-limit-mib 2048
 ```
 
-To choose tile size and graph cut automatically for any of these three schedules:
+To choose a supported execution schedule automatically:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\run_raster_auto.py --model models\evaluation\unet_dev.onnx --input data\input.tif --output runs\auto_scores.tif --memory-limit-mib 2048
 ```
 
-The report includes every calibrated candidate, the selected plan, and planning time. `--max-tile-size` optionally bounds the search; no schedule parameter is required.
+The report includes every calibrated candidate, the selected plan, and planning time. `--max-tile-size` optionally bounds the local-model search; no schedule parameter is required. For the validated attention fixture, the auto path uses blockwise softmax and rejects estimates above 30 minutes before staging raster data.
 
 ## Build order
 

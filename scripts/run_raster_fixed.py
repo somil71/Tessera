@@ -182,6 +182,18 @@ def own_peak_commit_bytes():
     return int(counters.peak_pagefile_usage)
 
 
+def own_peak_working_set_bytes():
+    """Return this Python process's lifetime peak resident bytes on Windows."""
+    Counters, kernel32, psapi = memory_api()
+    counters = Counters()
+    counters.cb = ctypes.sizeof(Counters)
+    if not psapi.GetProcessMemoryInfo(
+        kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+    ):
+        raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
+    return int(counters.peak_working_set_size)
+
+
 def run(args, external_job=None):
     started = time.perf_counter()
     model = args.model.resolve(strict=True)
