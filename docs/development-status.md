@@ -10,7 +10,7 @@ Raster Compiler aims to run an ONNX vision model on a GeoTIFF too large for norm
 
 | Stage | What was built | Why it exists | Evidence |
 | --- | --- | --- | --- |
-| Phase 1: foundation | Rust CLI, ONNX Runtime loading, generated ONNX fixtures, frozen support and evaluation documents | Defines the target user, exact correctness reference, model families, and baseline rules before planner work | Three development/held-out model fixtures pass ONNX Runtime smoke execution |
+| Phase 1: foundation | Rust CLI, ONNX Runtime loading, generated ONNX fixtures, frozen support and evaluation documents | Defines the target user, exact correctness reference, model families, and baseline rules before planner work | Three engineering model fixtures pass ONNX Runtime smoke execution; the originally designated attention holdout was later exposed in development |
 | Phase 2: graph analysis | ONNX wiring validation, producers and consumers, supported shape inference, tensor byte estimates, live tensors and byte totals at each cut | A planner needs explicit dependencies and boundary sizes before it can choose where to split or store tensors | Five Rust unit tests and graph inspection of U-Net, global mean, and attention fixtures |
 | Phase 3: subgraph execution | Head/tail model extraction, sequential Rust ONNX Runtime execution, boundary materialization, whole-model comparison, Windows process memory readings at execution stages | Tests whether a graph cut is both numerically correct and actually cheaper in process memory | All 16 internal cuts across three fixtures matched whole-model smoke outputs; [Phase 3 report](phase3-results.md) measures a larger U-Net |
 | Phase 4: fixed raster prototype | Python Rasterio window scheduler feeding the Rust split runner, edge padding and cropping for pixelwise models, georeferenced FP32 GeoTIFF output, band order, scale/offset, no-data rejection, a JSON run report | Connects the compiler core to a real raster format while limiting the first tiled path to models for which independent windows are exact | 37×53 raster passed 16-pixel and 11-pixel window assembly, preprocessing, CRS/transform preservation, and whole-image output comparison; invalid no-data and spatial U-Net cases were rejected |
@@ -39,7 +39,7 @@ The raster prototype's test output matched a whole-image pointwise ONNX Runtime 
 - The raster path accepts only pixelwise models. U-Net needs exact halo, stride-aligned windows, and edge handling. Global mean needs a whole-image reduction pass. Global attention needs a blockwise exact schedule. The current validator rejects these rather than returning incorrect maps.
 - The raster path launches a new Rust/ONNX Runtime process for every tile and uses temporary raw files. It is a correctness prototype, not a large-raster performance result.
 - The output report has no numerical error estimate for an arbitrary user raster because a whole-image reference may not fit. The test harness calculates error on small reference cases.
-- There is no independent user trial, real remote-sensing model/raster trial, tuned manual baseline, held-out 1 GiB run, or second physical machine. The frozen feasibility decision has not been made.
+- There is no independent user trial, real remote-sensing model/raster trial, tuned manual baseline, held-out 1 GiB run, or second physical machine. The originally designated attention holdout was exposed during development; [evaluation amendment 1](evaluation-amendment-1.md) requires a new independent holdout. The frozen feasibility decision has not been made.
 
 ## Next execution plan
 
@@ -47,7 +47,7 @@ The raster prototype's test output matched a whole-image pointwise ONNX Runtime 
 2. Add a fixed exact schedule for local convolutions: receptive-field halo, stride/pooling alignment, image-edge padding, output cropping, and multi-tile diff against a whole-image reference. Support the frozen U-Net first.
 3. Add the global-mean model with an explicit first reduction pass, then the blockwise attention path with a cost estimate and an infeasibility report when appropriate.
 4. Implement a planner that chooses keep, spill, or recompute using measured memory and disk costs. Enforce a job-wide committed-memory cap with a Windows Job Object.
-5. Run the frozen development and held-out protocol, retain failures and raw reports, compare against the four-hour tuned baseline, then test a real user model and raster.
+5. Freeze a new independent holdout under a versioned protocol, then run the development and held-out evaluation, retain failures and raw reports, compare against the four-hour tuned baseline, and test a real user model and raster.
 
 ## Reproduce the current checks
 

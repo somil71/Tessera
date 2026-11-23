@@ -2,7 +2,7 @@
 
 Rust tooling for planning inference on images that exceed an available memory budget. The first target is CPU inference for ONNX vision models on large GeoTIFF rasters.
 
-The [v1 support contract](docs/v1-contract.md) and [frozen evaluation protocol](docs/evaluation-protocol.md) define the product and its acceptance test. Phases 1–3 are complete as development milestones. A fixed, pixelwise-only GeoTIFF workflow is now available as a Phase 4 prototype. The [development status](docs/development-status.md) records what is complete, why it was built, what was measured, and what remains.
+The [v1 support contract](docs/v1-contract.md) and [frozen evaluation protocol](docs/evaluation-protocol.md) define the product and its acceptance test. The [evaluation amendment](docs/evaluation-amendment-1.md) records that the original attention holdout was exposed in development and must be replaced for the final evaluation. Phases 1–3 are complete as development milestones. A fixed, pixelwise-only GeoTIFF workflow is now available as a Phase 4 prototype. The [development status](docs/development-status.md) records what is complete, why it was built, what was measured, and what remains.
 
 ## Current state
 
