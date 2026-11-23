@@ -2,11 +2,11 @@
 
 Rust tooling for planning inference on images that exceed an available memory budget. The first target is CPU inference for ONNX vision models on large GeoTIFF rasters.
 
-The [v1 support contract](docs/v1-contract.md) and [frozen evaluation protocol](docs/evaluation-protocol.md) define the product and its acceptance test. The [evaluation amendment](docs/evaluation-amendment-1.md) records that the original attention holdout was exposed in development and must be replaced for the final evaluation. Phases 1–3 are complete as development milestones. Phase 4 now has fixed GeoTIFF schedules for pixelwise models and the [frozen local U-Net](docs/phase4-unet-results.md), both using a [persistent pipe worker](docs/phase4-worker-results.md). The [development status](docs/development-status.md) records what is complete, why it was built, what was measured, and what remains.
+The [v1 support contract](docs/v1-contract.md) and [frozen evaluation protocol](docs/evaluation-protocol.md) define the product and its acceptance test. The [evaluation amendment](docs/evaluation-amendment-1.md) records that the original attention holdout was exposed in development and must be replaced for the final evaluation. Phases 1–3 are complete as development milestones. Phase 4 has fixed GeoTIFF schedules for pixelwise models, the [frozen local U-Net](docs/phase4-unet-results.md), and the [global-mean fixture](docs/phase4-global-mean-results.md), using a [persistent pipe worker](docs/phase4-worker-results.md). The [development status](docs/development-status.md) records what is complete, why it was built, what was measured, and what remains.
 
 ## Current state
 
-The CLI loads an ONNX model, reports its input and output tensors, validates graph wiring, lists tensor producers and consumers, estimates tensor sizes for an image shape, and reports live tensors and their byte totals at every possible cut. It rejects inconsistent resolved output shapes and leaves unsupported shape patterns as `unknown`. Cut totals cover boundary tensors only; they are not peak process memory. The CLI can write two ONNX subgraphs at a chosen cut and execute them sequentially on a raw FP32 input, reporting time and Windows process memory. A Python wrapper reads and writes GeoTIFF windows for explicitly validated pixelwise models. The project does not yet choose cuts automatically or enforce a memory limit.
+The CLI loads an ONNX model, reports its input and output tensors, validates graph wiring, lists tensor producers and consumers, estimates tensor sizes for an image shape, and reports live tensors and their byte totals at every possible cut. It rejects inconsistent resolved output shapes and leaves unsupported shape patterns as `unknown`. Cut totals cover boundary tensors only; they are not peak process memory. The CLI can write two ONNX subgraphs at a chosen cut and execute them sequentially on a raw FP32 input. Python raster runners handle three validated model patterns and can enforce a Windows Job Object committed-memory cap. The project does not yet choose tile sizes, cuts, or storage decisions automatically.
 
 ```powershell
 cargo run -- inspect path\to\model.onnx
@@ -44,6 +44,7 @@ cargo build
 .\.venv\Scripts\python.exe tests\fixtures\create_pointwise_model.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_raster.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_unet_raster.py
+.\.venv\Scripts\python.exe tests\fixtures\smoke_global_mean_raster.py
 ```
 
 Run the fixed raster prototype with a pixelwise ONNX model and a georeferenced GeoTIFF:
@@ -62,6 +63,12 @@ For the frozen U-Net topology and an even-size raster, run the fixed exact spati
 ```
 
 This path validates the fixture topology, aligns tiles to the pool stride, reads a four-pixel halo, and clips halo windows at real image edges. It does not choose tile size or cut automatically.
+
+For the supported global-mean pattern, stream the reduction pass and execute the transformed pointwise graph under one job-wide cap:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_raster_global_mean.py --model models\evaluation\global_mean_dev.onnx --input data\input.tif --output runs\global_scores.tif --tile-size 256 --memory-limit-mib 2048
+```
 
 ## Build order
 

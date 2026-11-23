@@ -182,7 +182,7 @@ def own_peak_commit_bytes():
     return int(counters.peak_pagefile_usage)
 
 
-def run(args):
+def run(args, external_job=None):
     started = time.perf_counter()
     model = args.model.resolve(strict=True)
     source = args.input.resolve(strict=True)
@@ -226,10 +226,10 @@ def run(args):
     max_scheduler_commit = 0
     raw_bridge_bytes = 0
     worker = None
-    job = None
+    job = external_job
     published = False
     try:
-        if args.memory_limit_mib is not None:
+        if job is None and args.memory_limit_mib is not None:
             job = JobMemoryLimit(args.memory_limit_mib * 1024 * 1024)
         execute(
             [
@@ -454,7 +454,8 @@ def run(args):
             "status": "failed",
             "error": str(exc),
             "elapsed_seconds": time.perf_counter() - started,
-            "memory_limit_bytes": job.budget_bytes if job else None,
+            "memory_limit_bytes": (args.memory_limit_mib * 1024 * 1024
+                                   if args.memory_limit_mib is not None else None),
             "job_peak_committed_bytes": job.peak_job_bytes() if job else None,
             "job_peak_conservative_upper_bound_bytes":
                 job.conservative_peak_bytes() if job else None,
@@ -477,7 +478,7 @@ def run(args):
         for path in (tile_input, tile_output, head, tail):
             path.unlink(missing_ok=True)
         work.rmdir()
-        if job is not None:
+        if job is not None and external_job is None:
             job.close()
 
 
