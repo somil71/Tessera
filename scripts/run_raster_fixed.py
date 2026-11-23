@@ -17,6 +17,7 @@ from uuid import uuid4
 # Raster window assembly does not use BLAS. Prevent OpenBLAS from reserving
 # hundreds of megabytes for its default thread pool before NumPy is imported.
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["GDAL_CACHEMAX"] = "64"
 
 import numpy as np
 import onnx
@@ -32,6 +33,19 @@ DEFAULT_EXE = ROOT / "target" / "debug" / "raster-compiler.exe"
 DEFAULT_DLL = (
     ROOT / ".venv" / "Lib" / "site-packages" / "onnxruntime" / "capi" / "onnxruntime.dll"
 )
+
+
+def configure_gdal_cache(memory_limit_mib):
+    """Bound GDAL's raster block cache before the first raster read."""
+    if memory_limit_mib is None:
+        cache_mib = 64
+    elif memory_limit_mib < 512:
+        cache_mib = max(8, min(64, memory_limit_mib // 8))
+    else:
+        # Leave at least 256 MiB for Python, ONNX Runtime, and tile buffers.
+        cache_mib = min(1536, memory_limit_mib - 256)
+    os.environ["GDAL_CACHEMAX"] = str(cache_mib)
+    return cache_mib
 
 
 def arguments():
@@ -209,6 +223,7 @@ def run(args, external_job=None):
         raise ValueError("memory limit must be positive")
     if not np.isfinite(args.scale) or not np.isfinite(args.offset):
         raise ValueError("scale and offset must be finite")
+    gdal_cachemax_mib = configure_gdal_cache(args.memory_limit_mib)
     input_channels, output_channels = model_contract(model, args.tile_size)
     with rasterio.open(source) as source_check:
         expected_crs = source_check.crs
@@ -437,6 +452,7 @@ def run(args, external_job=None):
             "crs": str(src.crs),
             "transform": list(src.transform),
             "tile_size": args.tile_size,
+            "gdal_cachemax_mib": gdal_cachemax_mib,
             "tile_count": tiles,
             "worker_mode": args.worker_mode,
             "cut_after": args.cut_after,

@@ -11,6 +11,7 @@ import time
 from uuid import uuid4
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["GDAL_CACHEMAX"] = "64"
 
 import numpy as np
 import onnx
@@ -19,7 +20,7 @@ import rasterio
 from job_memory import JobMemoryLimit
 from run_raster_attention import (run as run_attention,
                                   validate_model as validate_attention)
-from run_raster_fixed import (DEFAULT_DLL, DEFAULT_EXE, model_contract,
+from run_raster_fixed import (DEFAULT_DLL, DEFAULT_EXE, configure_gdal_cache, model_contract,
                               own_peak_commit_bytes, run as run_pointwise)
 from run_raster_global_mean import (run as run_global_mean, transform,
                                     validate_reduction)
@@ -154,6 +155,7 @@ def run(args):
         raise ValueError("memory limit, threads, and maximum tile size must be positive")
     if not np.isfinite(args.scale) or not np.isfinite(args.offset):
         raise ValueError("scale and offset must be finite")
+    configure_gdal_cache(args.memory_limit_mib)
     output.parent.mkdir(parents=True, exist_ok=True)
     work = output.parent / f".{output.stem}.plan-{uuid4().hex}"
     work.mkdir()

@@ -13,6 +13,7 @@ import time
 from uuid import uuid4
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["GDAL_CACHEMAX"] = "64"
 
 import numpy as np
 import onnx
@@ -20,7 +21,8 @@ from onnx import TensorProto, helper
 import rasterio
 from rasterio.windows import Window
 
-from run_raster_fixed import DEFAULT_DLL, DEFAULT_EXE, execute, own_peak_commit_bytes, read_exact
+from run_raster_fixed import (DEFAULT_DLL, DEFAULT_EXE, configure_gdal_cache,
+                              execute, own_peak_commit_bytes, read_exact)
 from job_memory import JobMemoryLimit
 
 
@@ -213,6 +215,7 @@ def run(args, external_job=None):
         raise ValueError("memory limit must be positive")
     if not np.isfinite(args.scale) or not np.isfinite(args.offset):
         raise ValueError("scale and offset must be finite")
+    gdal_cachemax_mib = configure_gdal_cache(args.memory_limit_mib)
     channels, output_channels = validate_model(model)
     with rasterio.open(source) as source_check:
         expected_crs = source_check.crs
@@ -295,6 +298,7 @@ def run(args, external_job=None):
         report = dict(model=str(model), input=str(source), output=str(output),
                       shape=[src.height, src.width], crs=str(src.crs),
                       transform=list(src.transform), tile_size=args.tile_size,
+                      gdal_cachemax_mib=gdal_cachemax_mib,
                       tile_count=tiles, halo_pixels=4, alignment_pixels=2,
                       worker_shapes=[list(shape) for shape in shapes],
                       cut_after=args.cut_after, band_order=bands,

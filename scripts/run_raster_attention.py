@@ -10,6 +10,7 @@ import time
 from uuid import uuid4
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["GDAL_CACHEMAX"] = "64"
 
 import numpy as np
 import onnx
@@ -18,7 +19,8 @@ import rasterio
 from rasterio.windows import Window
 
 from job_memory import JobMemoryLimit
-from run_raster_fixed import own_peak_commit_bytes, own_peak_working_set_bytes
+from run_raster_fixed import (configure_gdal_cache, own_peak_commit_bytes,
+                              own_peak_working_set_bytes)
 
 
 def arguments():
@@ -188,6 +190,7 @@ def run(args, external_job=None):
         raise ValueError("time limit must be positive and finite")
     if not np.isfinite(args.scale) or not np.isfinite(args.offset):
         raise ValueError("scale and offset must be finite")
+    gdal_cachemax_mib = configure_gdal_cache(args.memory_limit_mib)
     output.parent.mkdir(parents=True, exist_ok=True)
     work = output.parent / f".{output.stem}.attention-{uuid4().hex}"
     work.mkdir()
@@ -248,6 +251,7 @@ def run(args, external_job=None):
                       crs=crs, transform=transform, band_order=bands,
                       scale=args.scale, offset=args.offset,
                       query_block=query_block, key_block=key_block,
+                      gdal_cachemax_mib=gdal_cachemax_mib,
                       estimated_attention_seconds=estimate,
                       pilot_seconds=pilot_seconds,
                       measured_pilot_score_cells_per_second=rate,

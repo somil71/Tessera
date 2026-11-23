@@ -15,6 +15,7 @@ Raster Compiler aims to run an ONNX vision model on a GeoTIFF too large for norm
 | Phase 3: subgraph execution | Head/tail model extraction, sequential Rust ONNX Runtime execution, boundary materialization, whole-model comparison, Windows process memory readings at execution stages | Tests whether a graph cut is both numerically correct and actually cheaper in process memory | All 16 internal cuts across three fixtures matched whole-model smoke outputs; [Phase 3 report](phase3-results.md) measures a larger U-Net |
 | Phase 4: fixed raster prototype | Python Rasterio schedulers for pixelwise, exact local U-Net, and two-pass global-mean models; persistent Rust pipe workers; georeferenced FP32 output; optional Windows Job Object cap and JSON reports | Connects the compiler core to a real raster format, handles local and one global dependency pattern, and tests job-wide committed-memory enforcement | Pixelwise 37×53 and U-Net 38×54 outputs matched exactly; global mean 33×47 and 96×80 passed frozen numerical tolerances, all under 128 MiB. A 48 MiB job rejected a 64 MiB commit. See [global-mean results](phase4-global-mean-results.md) and [job memory results](phase4-job-memory-results.md) |
 | Phase 5: automatic calibration and attention prototype | A required-cap CLI profiles tile sizes and cuts for the three local/reduction schedules and routes the validated global-attention pattern to blockwise online softmax with a pre-run cost gate | Removes developer-selected local schedules and avoids materializing the quadratic attention score matrix | Three local/reduction auto outputs matched references under 128 MiB; attention 8×10, 64×64, and 96×96 passed frozen tolerances. An 8192×8192 attention case was rejected before staging. See [planner results](phase5-auto-plan-results.md) and [attention results](phase5-attention-results.md) |
+| Phase 6: large development rasters | Chunked deterministic 8192×8192 input generation, budgeted GDAL cache, bounded-window output comparison, and a hash-checked audit manifest | Tests actual large GeoTIFF execution and ties comparison results to the output files that were measured | U-Net and global-mean automatic runs finished under the 2 GiB job cap; alternate legal partitions had zero differing FP32 values in 1,024 windows each. These are single development runs, not the independent feasibility decision. See [large-raster results](phase6-large-raster-results.md) |
 
 The source of each piece is [graph.rs](../src/graph.rs), [split.rs](../src/split.rs), [execute.rs](../src/execute.rs), [memory.rs](../src/memory.rs), and [run_raster_fixed.py](../scripts/run_raster_fixed.py). Test fixtures and benchmark scripts live in `tests/`.
 
@@ -44,12 +45,14 @@ The first automatic planner run covered all three supported model families on a 
 
 The blockwise attention path passed whole-image comparisons at 8×10, 64×64, and 96×96 under 128 MiB. Largest maximum absolute error was 1.74×10⁻⁵ and largest eligible-relative error 1.01×10⁻⁴. The 96×96 run recorded 89.61 MB peak job commitment and 434,460 bytes of peak temporary storage. A metadata-only 8192×8192 raster was rejected on cost before staging. The historical attention model is exposed development material, not the new holdout. See [attention results](phase5-attention-results.md).
 
+Two deterministic 8192×8192 three-band development GeoTIFFs now exercise the actual raster path. The automatic U-Net run took 113.0 s, including 13.9 s of planning, and peaked at 1,764.6 MB committed under the 2 GiB cap. The automatic global-mean run took 102.7 s, including 2.0 s of planning, and peaked at 1,685.5 MB. Alternate legal partitions produced zero differing FP32 output values, with matching CRS and transforms. Comparison reports include SHA-256 hashes of both outputs, and the audit script checks those hashes against current files. These are single development runs; see [Phase 6 results](phase6-large-raster-results.md).
+
 ## Remaining gaps
 
 - An empirical planner now chooses tile size and graph cut for the three fixed schedules. It does not choose keep/spill/recompute, estimate disk costs, or analyze arbitrary supported graphs. Its ranking must still be measured against the tuned baseline.
 - The fixed runners can optionally enforce a Windows Job Object committed-memory cap; the automatic CLI requires it. Job-wide peak working set is not yet measured.
 - Raster execution has four validated patterns: pixelwise models, the development U-Net topology, first-node spatial global mean, and the exposed self-attention fixture. There is no generic receptive-field, global-operation, or transformer-graph analyzer. Unsupported models are rejected rather than silently miscomputed.
-- The default raster path has a persistent Rust worker and no raw tile bridge, but Python still owns GeoTIFF I/O. It is a correctness prototype, not a large-raster performance result.
+- The default raster path has a persistent Rust worker and no raw tile bridge, but Python still owns GeoTIFF I/O. Large development runs exist, but repeated held-out performance results do not.
 - The output report has no numerical error estimate for an arbitrary user raster because a whole-image reference may not fit. The test harness calculates error on small reference cases.
 - There is no independent user trial, real remote-sensing model/raster trial, tuned manual baseline, held-out 1 GiB run, or second physical machine. The originally designated attention holdout was exposed during development; [evaluation amendment 1](evaluation-amendment-1.md) requires a new independent holdout. The frozen feasibility decision has not been made.
 
@@ -81,4 +84,5 @@ cargo clippy --all-targets -- -D warnings
 .\.venv\Scripts\python.exe tests\fixtures\smoke_worker.py
 .\.venv\Scripts\python.exe tests\benchmark_phase3.py
 .\.venv\Scripts\python.exe tests\benchmark_worker.py
+.\.venv\Scripts\python.exe tests\performance\summarize_large_runs.py
 ```

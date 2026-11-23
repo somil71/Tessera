@@ -10,6 +10,7 @@ import time
 from uuid import uuid4
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["GDAL_CACHEMAX"] = "64"
 
 import numpy as np
 import onnx
@@ -18,7 +19,8 @@ import rasterio
 from rasterio.windows import Window
 
 from job_memory import JobMemoryLimit
-from run_raster_fixed import DEFAULT_DLL, DEFAULT_EXE, model_contract, run as run_pointwise
+from run_raster_fixed import (DEFAULT_DLL, DEFAULT_EXE, configure_gdal_cache,
+                              model_contract, run as run_pointwise)
 
 
 def arguments():
@@ -126,6 +128,7 @@ def run(args, external_job=None):
         raise ValueError("tile size, threads, and memory limit must be positive")
     if not np.isfinite(args.scale) or not np.isfinite(args.offset):
         raise ValueError("scale and offset must be finite")
+    configure_gdal_cache(args.memory_limit_mib)
     model = onnx.load(model_path)
     channels, reduction_output = validate_reduction(model)
     if args.band_order:
