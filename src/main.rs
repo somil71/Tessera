@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use onnx_protobuf::{Message, ModelProto};
@@ -90,6 +90,12 @@ enum Command {
         width: usize,
         #[arg(long, default_value_t = 4)]
         threads: usize,
+        /// Spill graph-boundary tensors to disk before loading the tail session.
+        #[arg(long)]
+        spill_boundary: bool,
+        /// Parent directory for temporary boundary files.
+        #[arg(long, requires = "spill_boundary")]
+        spill_dir: Option<PathBuf>,
     },
     /// Keep split-model sessions loaded and execute JSON-line tile requests.
     ServeSplit {
@@ -171,6 +177,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             height,
             width,
             threads,
+            spill_boundary,
+            spill_dir,
         } => execute::split(
             &head,
             &tail,
@@ -182,6 +190,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 width,
                 threads,
             },
+            spill_boundary.then(|| {
+                spill_dir
+                    .as_deref()
+                    .unwrap_or_else(|| output_f32.parent().unwrap_or(Path::new(".")))
+            }),
         )?,
         Command::ServeSplit {
             head,

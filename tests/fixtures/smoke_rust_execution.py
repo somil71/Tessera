@@ -111,3 +111,19 @@ for name, shape in CASES:
             max_rel,
         )
         print(f"{name} cut {cut}: max_abs={max_abs:.3g}, max_rel={max_rel:.3g}")
+        disk_path = split_dir / "spilled.f32"
+        spilled = subprocess.run(
+            [EXE, "run-split", split_dir / "head.onnx", split_dir / "tail.onnx",
+             *base, "--output-f32", disk_path, "--spill-boundary",
+             "--spill-dir", split_dir],
+            env=ENV, check=True, capture_output=True, text=True,
+        )
+        spilled_output = np.fromfile(disk_path, dtype="<f4").reshape(expected.shape)
+        spill_abs, spill_rel = error(spilled_output, expected)
+        assert spill_abs <= 1e-4 and spill_rel <= 1e-3, (
+            name, cut, "spill", spill_abs, spill_rel
+        )
+        assert np.array_equal(spilled_output, actual)
+        assert "boundary_storage=disk" in spilled.stdout
+        assert "spill_write_bytes=" in spilled.stdout
+        assert not list(split_dir.glob(".raster-compiler-spill-*"))

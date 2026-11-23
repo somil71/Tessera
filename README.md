@@ -19,6 +19,8 @@ cargo run -- run path\to\model.onnx --input-f32 data\input.f32 --output-f32 runs
 cargo run -- run-split runs\split\head.onnx runs\split\tail.onnx --input-f32 data\input.f32 --output-f32 runs\split.f32 --channels 3 --height 1024 --width 1024
 ```
 
+`run-split` also accepts `--spill-boundary --spill-dir runs\spill` to move intermediate tensors to disk between the head and tail sessions. The [spill experiment](docs/phase7-boundary-spill-results.md) measured its memory savings and runtime cost. This mode is experimental and is not yet selected by the automatic raster planner.
+
 The `ort` dependency loads ONNX Runtime dynamically. On this machine, the Rust target is `x86_64-pc-windows-gnu`, which has no matching prebuilt ONNX Runtime package in `ort`. To run `inspect`, provide a compatible `onnxruntime.dll` and set `ORT_DYLIB_PATH` to its full path. `graph` reads the ONNX file without loading ONNX Runtime. Keep local models in `models/`, rasters in `data/`, and experiment outputs in `runs/`. These directories are excluded from Git.
 
 For a local smoke test on Windows, create a virtual environment and a tiny model:
