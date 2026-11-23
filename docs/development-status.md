@@ -14,6 +14,7 @@ Raster Compiler aims to run an ONNX vision model on a GeoTIFF too large for norm
 | Phase 2: graph analysis | ONNX wiring validation, producers and consumers, supported shape inference, tensor byte estimates, live tensors and byte totals at each cut | A planner needs explicit dependencies and boundary sizes before it can choose where to split or store tensors | Five Rust unit tests and graph inspection of U-Net, global mean, and attention fixtures |
 | Phase 3: subgraph execution | Head/tail model extraction, sequential Rust ONNX Runtime execution, boundary materialization, whole-model comparison, Windows process memory readings at execution stages | Tests whether a graph cut is both numerically correct and actually cheaper in process memory | All 16 internal cuts across three fixtures matched whole-model smoke outputs; [Phase 3 report](phase3-results.md) measures a larger U-Net |
 | Phase 4: fixed raster prototype | Python Rasterio schedulers for pixelwise, exact local U-Net, and two-pass global-mean models; persistent Rust pipe workers; georeferenced FP32 output; optional Windows Job Object cap and JSON reports | Connects the compiler core to a real raster format, handles local and one global dependency pattern, and tests job-wide committed-memory enforcement | Pixelwise 37×53 and U-Net 38×54 outputs matched exactly; global mean 33×47 and 96×80 passed frozen numerical tolerances, all under 128 MiB. A 48 MiB job rejected a 64 MiB commit. See [global-mean results](phase4-global-mean-results.md) and [job memory results](phase4-job-memory-results.md) |
+| Phase 5: automatic calibration prototype | A required-cap CLI profiles tile sizes and cuts for the three validated raster schedules, predicts full-run cost, retries failed choices, and records every candidate | Removes developer-selected tile and cut choices for supported paths | On a 32×48 raster, all three automatically selected outputs matched whole-image references under 128 MiB; a 60 MiB cap produced an auditable no-feasible-plan failure. See [planner results](phase5-auto-plan-results.md) |
 
 The source of each piece is [graph.rs](../src/graph.rs), [split.rs](../src/split.rs), [execute.rs](../src/execute.rs), [memory.rs](../src/memory.rs), and [run_raster_fixed.py](../scripts/run_raster_fixed.py). Test fixtures and benchmark scripts live in `tests/`.
 
@@ -24,6 +25,7 @@ The source of each piece is [graph.rs](../src/graph.rs), [split.rs](../src/split
 3. Rust `run` executes one model on raw little-endian NCHW FP32 data. Rust `run-split` executes the head, copies required boundary tensors, releases the head session, then loads and executes the tail. It writes raw FP32 scores. Keeping the original input alive through the head run fixed an aliasing error discovered during testing.
 4. The fixed pixelwise raster prototype validates that each operation is independent at every pixel. A second, topology-checked U-Net path aligns output tiles to the pool stride, adds a four-pixel input halo, clips at true image edges, and crops the returned scores. Both send raw tile bytes to persistent Rust `serve-split-pipe` workers and write georeferenced FP32 windows. Rasterio copies the source CRS and transform into the output profile. [Rasterio's window API](https://rasterio.readthedocs.io/en/stable/topics/windowed-rw.html) supplies the windowed I/O.
 5. The global-mean path first streams every raster window to compute the full-image channel mean, replaces the spatial reduction with that FP32 constant, then executes the remaining pointwise graph under the same job-wide cap. Its output uses the same georeferenced FP32 writer.
+6. The automatic runner calibrates legal tile and cut choices using the Rust worker under the same job cap, ranks them by measured cost and raster geometry, then executes a feasible choice through one of the three fixed paths. It records probe costs and failed attempts in the output report.
 
 Python currently owns GeoTIFF I/O because Rasterio has a Windows wheel in the pinned Python 3.11 environment, while native GDAL is not installed in the workspace. The first version used a raw-file bridge and one Rust process per tile. The default now keeps both ONNX Runtime sessions loaded and sends tile data over pipes. On the 12-window smoke workload, median elapsed time fell from 1.647 s with fresh processes to 0.240 s with pipes; Rust worker peak committed memory rose from 16.95 to 18.22 MiB. See [worker measurements](phase4-worker-results.md). The newer optional memory budget joins the Python scheduler and all Rust model processes to a Windows Job Object and records its peak committed memory; [the cap test](phase4-job-memory-results.md) also verifies an over-budget commit fails.
 
@@ -37,10 +39,12 @@ The separate U-Net raster path matched whole-image logits exactly at tile sizes 
 
 The two-pass global-mean path passed the protocol's 33×47 and 96×80 correctness sizes at tile sizes 8, 13, and 24. Its largest absolute error against whole-image ONNX Runtime logits was 1.49×10⁻⁸ and largest eligible-relative error 1.92×10⁻⁶. It rejected no-data during the reduction pass before publishing output. See [the global-mean report](phase4-global-mean-results.md).
 
+The first automatic planner run covered all three supported model families on a 32×48 raster under 128 MiB without manual tile or cut selection. Pointwise and U-Net outputs matched exactly; global mean differed by at most 1.49×10⁻⁸. Its U-Net path profiled 35 candidates, so planning time is material on this small test and remains part of the final performance comparison. See [the planner report](phase5-auto-plan-results.md).
+
 ## Remaining gaps
 
-- There is no automatic cut, keep/spill/recompute planner. Manual cuts are exploratory.
-- The two fixed raster runners can enforce a Windows Job Object committed-memory cap when requested, but there is no automatic choice of tile size or graph cut. The final v1 CLI must require the cap and choose a feasible plan. Job-wide peak working set is not yet measured.
+- An empirical planner now chooses tile size and graph cut for the three fixed schedules. It does not choose keep/spill/recompute, estimate disk costs, or analyze arbitrary supported graphs. Its ranking must still be measured against the tuned baseline.
+- The fixed runners can optionally enforce a Windows Job Object committed-memory cap; the automatic CLI requires it. Job-wide peak working set is not yet measured.
 - Raster execution has three fixed paths: pixelwise models, the validated development U-Net topology, and a first-node spatial global mean. There is no generic receptive-field or global-operation analyzer yet. Global attention needs a blockwise exact schedule. Unsupported models are rejected rather than silently miscomputed.
 - The default raster path has a persistent Rust worker and no raw tile bridge, but Python still owns GeoTIFF I/O. It is a correctness prototype, not a large-raster performance result.
 - The output report has no numerical error estimate for an arbitrary user raster because a whole-image reference may not fit. The test harness calculates error on small reference cases.
@@ -48,9 +52,9 @@ The two-pass global-mean path passed the protocol's 33×47 and 96×80 correctnes
 
 ## Next execution plan
 
-1. Generalize the local-model halo and alignment analysis beyond the frozen U-Net topology, and integrate it with automatic tile and cut selection.
+1. Generalize the local-model halo and alignment analysis beyond the frozen U-Net topology, and add measured keep/spill/recompute planning.
 2. Add the blockwise attention path with a cost estimate and an infeasibility report when appropriate.
-3. Implement a planner that chooses tile size, graph cut, and keep/spill/recompute using measured memory and disk costs. Make the existing Job Object cap mandatory in the final CLI and add job-wide working-set measurement.
+3. Extend the empirical planner with keep/spill/recompute and disk costs. Add job-wide working-set measurement and a required cap for every final user path.
 4. Freeze a new independent holdout under a versioned protocol, then run the development and held-out evaluation, retain failures and raw reports, compare against the four-hour tuned baseline, and test a real user model and raster.
 
 ## Reproduce the current checks
@@ -68,6 +72,7 @@ cargo clippy --all-targets -- -D warnings
 .\.venv\Scripts\python.exe tests\fixtures\smoke_raster.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_unet_raster.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_global_mean_raster.py
+.\.venv\Scripts\python.exe tests\fixtures\smoke_auto_raster.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_job_memory.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_worker.py
 .\.venv\Scripts\python.exe tests\benchmark_phase3.py

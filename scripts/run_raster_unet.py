@@ -198,7 +198,7 @@ class Worker:
         self.directory.rmdir()
 
 
-def run(args):
+def run(args, external_job=None):
     started = time.perf_counter()
     model = args.model.resolve(strict=True)
     source = args.input.resolve(strict=True)
@@ -231,14 +231,14 @@ def run(args):
     partial = output.parent / f".{output.stem}.partial-{uuid4().hex}.tif"
     failure_path = output.with_suffix(".failure.json")
     worker = None
-    job = None
+    job = external_job
     published = False
     shapes = {}
     peak_child = 0
     peak_scheduler = 0
     tiles = 0
     try:
-        if args.memory_limit_mib is not None:
+        if job is None and args.memory_limit_mib is not None:
             job = JobMemoryLimit(args.memory_limit_mib * 1024 * 1024)
         with rasterio.open(source) as src:
             if (src.crs != expected_crs or src.count != channels
@@ -328,7 +328,7 @@ def run(args):
             worker.close()
         partial.unlink(missing_ok=True)
         work.rmdir()
-        if job is not None:
+        if job is not None and external_job is None:
             job.close()
 
 

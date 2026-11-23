@@ -113,7 +113,7 @@ def transform(model, reduction_output, mean, path, tile_size):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def run(args):
+def run(args, external_job=None):
     started = time.perf_counter()
     model_path = args.model.resolve(strict=True)
     source = args.input.resolve(strict=True)
@@ -137,10 +137,11 @@ def run(args):
     output.parent.mkdir(parents=True, exist_ok=True)
     transformed = output.parent / f".{output.stem}.mean-{uuid4().hex}.onnx"
     failure_path = output.with_suffix(".failure.json")
-    job = None
+    job = external_job
     published = False
     try:
-        job = JobMemoryLimit(args.memory_limit_mib * 1024 * 1024)
+        if job is None:
+            job = JobMemoryLimit(args.memory_limit_mib * 1024 * 1024)
         reduction_started = time.perf_counter()
         mean, reduction_windows = streaming_mean(
             source, channels, bands, args.tile_size, args.scale, args.offset
@@ -176,7 +177,7 @@ def run(args):
         raise
     finally:
         transformed.unlink(missing_ok=True)
-        if job is not None:
+        if job is not None and external_job is None:
             job.close()
 
 
