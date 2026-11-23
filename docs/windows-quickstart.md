@@ -38,6 +38,7 @@ cargo test
 .\.venv\Scripts\python.exe tests\fixtures\smoke_auto_raster.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_pointwise_operators.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_local_graph.py
+.\.venv\Scripts\python.exe tests\fixtures\smoke_generic_local_raster.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_storage_planner.py
 .\.venv\Scripts\python.exe tests\fixtures\smoke_job_memory.py
 ```

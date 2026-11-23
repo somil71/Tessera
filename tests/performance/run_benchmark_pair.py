@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNNERS = {
     "pointwise": ROOT / "scripts" / "run_raster_fixed.py",
     "local_unet": ROOT / "scripts" / "run_raster_unet.py",
+    "local_graph": ROOT / "scripts" / "run_raster_local.py",
     "global_mean": ROOT / "scripts" / "run_raster_global_mean.py",
 }
 AUTO = ROOT / "scripts" / "run_raster_auto.py"
@@ -35,6 +36,8 @@ def arguments():
     parser.add_argument("--baseline-threads", type=int, required=True)
     parser.add_argument("--baseline-tile-size", type=int, required=True)
     parser.add_argument("--baseline-cut-after", type=int, default=0)
+    parser.add_argument("--baseline-storage-mode", choices=("memory", "disk"),
+                        default="memory")
     parser.add_argument("--max-auto-tile-size", type=int, default=512)
     parser.add_argument("--baseline-tuning-log", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=5,
@@ -97,6 +100,7 @@ def run(args):
                     baseline_threads=args.baseline_threads,
                     baseline_tile_size=args.baseline_tile_size,
                     baseline_cut_after=args.baseline_cut_after,
+                    baseline_storage_mode=args.baseline_storage_mode,
                     repeats=args.repeats, pairs=[])
     summary_path = out / "benchmark.json"
     summary_path.write_text(json.dumps(manifest, indent=2)+"\n", encoding="utf-8")
@@ -118,6 +122,8 @@ def run(args):
             else:
                 command.extend(["--tile-size", str(args.baseline_tile_size),
                                 "--cut-after", str(args.baseline_cut_after)])
+                if args.family in {"local_unet", "local_graph"}:
+                    command.extend(["--storage-mode", args.baseline_storage_mode])
             raw = invoke(command, out / f"{stem}.process.json")
             run = dict(output=str(output), process_record=f"{stem}.process.json",
                        exit_code=raw["exit_code"], wall_seconds=raw["wall_seconds"])

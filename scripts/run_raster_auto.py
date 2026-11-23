@@ -18,7 +18,7 @@ import onnx
 import rasterio
 
 from job_memory import JobMemoryLimit
-from local_graph import analyze_local
+from local_graph import analyze_local, local_channels, validate_local_raster
 from run_raster_attention import (run as run_attention,
                                   validate_model as validate_attention)
 from run_raster_fixed import (DEFAULT_DLL, DEFAULT_EXE, configure_gdal_cache, model_contract,
@@ -52,7 +52,7 @@ def arguments():
 
 def model_family(model_path, model):
     supported_ops = {"Conv", "ConvTranspose", "Relu", "Identity", "Sigmoid",
-                     "BatchNormalization", "Add", "Sub", "Mul",
+                     "BatchNormalization", "Add", "Sub", "Mul", "Concat",
                      "MaxPool", "ReduceMean", "Shape", "Reshape", "Transpose",
                      "MatMul", "Softmax"}
     for index, node in enumerate(model.graph.node):
@@ -70,21 +70,27 @@ def model_family(model_path, model):
             return "local_unet", channels, scores, None
         except ValueError as unet_error:
             try:
-                channels, mean_name = validate_reduction(model)
-                scores = model.graph.output[0].type.tensor_type.shape.dim[1].dim_value
-                if scores < 1:
-                    raise ValueError("output channel count must be fixed")
-                return "global_mean", channels, scores, mean_name
-            except ValueError as global_error:
+                channels, scores = local_channels(model)
+                analyze_local(model)
+                return "local_graph", channels, scores, None
+            except ValueError as local_error:
                 try:
-                    channels = validate_attention(model)
-                    return "block_attention", channels, channels, None
-                except ValueError as attention_error:
-                    raise ValueError(
-                        "model does not match a supported raster schedule: "
-                        f"pointwise: {pointwise_error}; U-Net: {unet_error}; "
-                        f"global mean: {global_error}; attention: {attention_error}"
-                    ) from attention_error
+                    channels, mean_name = validate_reduction(model)
+                    scores = model.graph.output[0].type.tensor_type.shape.dim[1].dim_value
+                    if scores < 1:
+                        raise ValueError("output channel count must be fixed")
+                    return "global_mean", channels, scores, mean_name
+                except ValueError as global_error:
+                    try:
+                        channels = validate_attention(model)
+                        return "block_attention", channels, channels, None
+                    except ValueError as attention_error:
+                        raise ValueError(
+                            "model does not match a supported raster schedule: "
+                            f"pointwise: {pointwise_error}; U-Net: {unet_error}; "
+                            f"local: {local_error}; global mean: {global_error}; "
+                            f"attention: {attention_error}"
+                        ) from attention_error
 
 
 def candidate_tiles(height, width, maximum, family):
@@ -101,7 +107,7 @@ def candidate_tiles(height, width, maximum, family):
 
 
 def worker_shape_count(height, width, tile, family, local_plan=None):
-    if family != "local_unet":
+    if family not in {"local_unet", "local_graph"}:
         return 1
     heights = set()
     for row in range(0, height, tile):
@@ -123,7 +129,7 @@ def profile_candidate(model, directory, family, tile, cut, channels, scores,
                       local_plan=None):
     shape = ((min(height, tile+2*local_plan.halo_y),
               min(width, tile+2*local_plan.halo_x))
-             if family == "local_unet" else (tile, tile))
+             if family in {"local_unet", "local_graph"} else (tile, tile))
     candidate = dict(tile_size=tile, cut_after=cut, storage_mode=storage_mode,
                      probe_shape=list(shape),
                      tile_count=math.ceil(height/tile)*math.ceil(width/tile),
@@ -211,15 +217,19 @@ def run(args):
         job = JobMemoryLimit(args.memory_limit_mib*1024*1024)
         model = onnx.load(model_path)
         family, channels, scores, mean_name = model_family(model_path, model)
-        local_plan = analyze_local(model) if family == "local_unet" else None
+        local_plan = (analyze_local(model) if family in {"local_unet", "local_graph"}
+                      else None)
         if family != "global_mean" and len(model.graph.node) < 2:
             raise ValueError("split worker requires at least two model nodes")
         with rasterio.open(source) as src:
             if src.crs is None or src.count != channels:
                 raise ValueError("raster requires a CRS and the model's band count")
             height, width = src.height, src.width
-        if family == "local_unet" and (height % 2 or width % 2):
-            raise ValueError("local U-Net requires even raster dimensions")
+        if family in {"local_unet", "local_graph"}:
+            if height % local_plan.alignment_y or width % local_plan.alignment_x:
+                raise ValueError("raster dimensions violate local graph alignment")
+            if family == "local_graph":
+                validate_local_raster(model, height, width)
         if args.band_order:
             bands = tuple(int(part) for part in args.band_order.split(","))
             if sorted(bands) != list(range(1, channels+1)):
@@ -252,12 +262,17 @@ def run(args):
                       generated_model, 16)
             probe_model = generated_model
         tiles = candidate_tiles(height, width, args.max_tile_size, family)
+        if local_plan is not None:
+            tiles = [tile for tile in tiles if tile % local_plan.alignment_y == 0
+                     and tile % local_plan.alignment_x == 0]
+            if not tiles:
+                raise ValueError("maximum tile size is below local graph alignment")
         cuts = range(len(model.graph.node)-1)
         if family == "global_mean":
             cuts = (0,)
         probed_disk_tiles = set()
         attempted_plans = set()
-        rounds = 2 if family == "local_unet" else 1
+        rounds = 2 if local_plan is not None else 1
         for round_index in range(rounds):
             if round_index == 0:
                 for tile in tiles:
@@ -267,7 +282,7 @@ def run(args):
                             probe_model, directory, family, tile, cut, channels,
                             scores, height, width, exe, env, args.threads, job,
                             "memory", local_plan))
-                if family == "local_unet":
+                if local_plan is not None:
                     ram_ok = [trial for trial in trials if trial["status"] == "ok"]
                     best_ram = (min(ram_ok, key=lambda trial:
                                 trial["predicted_execution_seconds"])
@@ -310,7 +325,8 @@ def run(args):
                 try:
                     if family == "pointwise":
                         run_pointwise(run_args, external_job=job)
-                    elif family == "local_unet":
+                    elif family in {"local_unet", "local_graph"}:
+                        run_args.general_local = family == "local_graph"
                         run_unet(run_args, external_job=job)
                     else:
                         run_global_mean(run_args, external_job=job)

@@ -8,7 +8,7 @@ The [v1 support contract](docs/v1-contract.md) and [frozen evaluation protocol](
 
 ## Current state
 
-The CLI loads an ONNX model, reports its input and output tensors, validates graph wiring, lists tensor producers and consumers, estimates tensor sizes for an image shape, and reports live tensors and their byte totals at every possible cut. It rejects inconsistent resolved output shapes and leaves unsupported shape patterns as `unknown`. Cut totals cover boundary tensors only; they are not peak process memory. The CLI can write two ONNX subgraphs at a chosen cut and execute them sequentially on a raw FP32 input. Python raster runners handle four validated model patterns and enforce a Windows Job Object committed-memory cap when requested. The automatic runner profiles tile sizes, graph cuts, and U-Net graph-boundary storage when the measured runtime warrants it; its attention path estimates runtime and uses blockwise online softmax. A [local graph analyzer](docs/local-graph-analysis.md) derives the U-Net tile halo and alignment and has been checked on a separate branched graph. The project does not yet implement recomputation, a generic local raster runner, or a general storage planner for arbitrary ONNX graphs.
+The CLI loads an ONNX model, reports its input and output tensors, validates graph wiring, lists tensor producers and consumers, estimates tensor sizes for an image shape, and reports live tensors and their byte totals at every possible cut. It rejects inconsistent resolved output shapes and leaves unsupported shape patterns as `unknown`. Cut totals cover boundary tensors only; they are not peak process memory. The CLI can write two ONNX subgraphs at a chosen cut and execute them sequentially on a raw FP32 input. Python raster runners handle bounded pixelwise, local, global-mean, and attention model patterns and enforce a Windows Job Object committed-memory cap when requested. The automatic runner profiles tile sizes, graph cuts, and local graph-boundary storage when the measured runtime warrants it; its attention path estimates runtime and uses blockwise online softmax. A [local graph analyzer](docs/local-graph-analysis.md) derives tile halo and alignment for the supported local operator set. The project does not yet implement recomputation or a general storage planner for arbitrary ONNX graphs.
 
 ```powershell
 cargo run -- inspect path\to\model.onnx
@@ -69,6 +69,8 @@ For the frozen U-Net topology and an even-size raster, run the fixed exact spati
 ```
 
 This path validates the supported topology without depending on the development fixture's tensor names, aligns tiles to the pool stride, reads a four-pixel halo, and clips halo windows at real image edges. It does not choose tile size or cut automatically. Add `--storage-mode disk` to use graph-boundary spill at the selected cut.
+
+For other supported local Conv/Pool/ConvTranspose/pointwise/channel-Concat graphs, use `scripts\run_raster_local.py` with the same fixed-run arguments. It derives the halo and alignment, checks output dimensions for every tile shape, and rejects unmodeled operators. The automatic runner recognizes this bounded local family as well. See the [general local raster results](docs/generic-local-raster-results.md).
 
 For the supported global-mean pattern, stream the reduction pass and execute the transformed pointwise graph under one job-wide cap:
 

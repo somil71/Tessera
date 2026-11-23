@@ -24,11 +24,11 @@ from rasterio.windows import Window
 from run_raster_fixed import (DEFAULT_DLL, DEFAULT_EXE, configure_gdal_cache,
                               execute, own_peak_commit_bytes, read_exact)
 from job_memory import JobMemoryLimit
-from local_graph import analyze_local
+from local_graph import analyze_local, local_channels, validate_local_raster
 
 
-def arguments():
-    parser = argparse.ArgumentParser(description=__doc__)
+def arguments(description=__doc__):
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -259,17 +259,22 @@ def run(args, external_job=None):
     if output.exists() and not args.overwrite:
         raise FileExistsError(f"output already exists: {output}")
     if args.tile_size < 2 or args.threads < 1:
-        raise ValueError("U-Net tile size and threads must be positive")
+        raise ValueError("tile size and threads must be positive")
     if args.memory_limit_mib is not None and args.memory_limit_mib < 1:
         raise ValueError("memory limit must be positive")
     if not np.isfinite(args.scale) or not np.isfinite(args.offset):
         raise ValueError("scale and offset must be finite")
     gdal_cachemax_mib = configure_gdal_cache(args.memory_limit_mib)
-    channels, output_channels = validate_model(model)
-    local_plan = analyze_local(onnx.load(model))
+    general_local = getattr(args, "general_local", False)
+    model_graph = onnx.load(model)
+    if general_local:
+        channels, output_channels = local_channels(model_graph)
+    else:
+        channels, output_channels = validate_model(model)
+    local_plan = analyze_local(model_graph)
     if (args.tile_size % local_plan.alignment_y or
             args.tile_size % local_plan.alignment_x):
-        raise ValueError("U-Net tile size must respect graph spatial alignment")
+        raise ValueError("tile size must respect graph spatial alignment")
     with rasterio.open(source) as source_check:
         expected_crs = source_check.crs
         expected_shape = (source_check.height, source_check.width)
@@ -277,7 +282,9 @@ def run(args, external_job=None):
             raise ValueError("raster requires a CRS and the model's band count")
         if (source_check.height % local_plan.alignment_y or
                 source_check.width % local_plan.alignment_x):
-            raise ValueError("U-Net whole-image dimensions violate graph alignment")
+            raise ValueError("whole-image dimensions violate graph alignment")
+        if general_local:
+            validate_local_raster(model_graph, source_check.height, source_check.width)
     exe = args.exe.resolve(strict=True)
     dll = args.ort_dll.resolve(strict=True)
     env = os.environ.copy()
@@ -326,6 +333,8 @@ def run(args, external_job=None):
                         right = min(src.width, col + core_w + local_plan.halo_x)
                         shape = (bottom - top, right - left)
                         shapes.setdefault(shape, []).append((row, col, core_h, core_w, top, left))
+                if general_local:
+                    validate_local_raster(model_graph, src.height, src.width, shapes)
                 # Output windows may be written in any order. Grouping by halo
                 # shape reuses one session pair without holding several workers.
                 for shape, jobs in shapes.items():
@@ -356,6 +365,7 @@ def run(args, external_job=None):
         os.replace(partial, output)
         published = True
         report = dict(model=str(model), input=str(source), output=str(output),
+                      schedule="local_graph" if general_local else "local_unet",
                       shape=[src.height, src.width], crs=str(src.crs),
                       transform=list(src.transform), tile_size=args.tile_size,
                       gdal_cachemax_mib=gdal_cachemax_mib,
@@ -384,7 +394,7 @@ def run(args, external_job=None):
             report.update(job.resource_snapshot())
         output.with_suffix(".report.json").write_text(json.dumps(report, indent=2)+"\n")
         failure_path.unlink(missing_ok=True)
-        print(f"wrote {output}; {tiles} U-Net tiles")
+        print(f"wrote {output}; {tiles} local tiles")
     except Exception as exc:
         failure = dict(status="failed", error=str(exc),
                        elapsed_seconds=time.perf_counter()-started,
@@ -394,7 +404,10 @@ def run(args, external_job=None):
                        job_peak_conservative_upper_bound_bytes=(
                            job.conservative_peak_bytes() if job else None),
                        output_published=published)
-        failure_path.write_text(json.dumps(failure, indent=2)+"\n")
+        failure_json = json.dumps(failure, indent=2)+"\n"
+        failure_path.write_text(failure_json)
+        archive = output.with_name(f"{output.stem}.failure-{uuid4().hex}.json")
+        archive.write_text(failure_json)
         raise
     finally:
         if worker is not None:

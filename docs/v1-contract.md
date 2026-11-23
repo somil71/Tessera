@@ -10,7 +10,7 @@ Raster Compiler v1 targets Windows x64 CPU inference. A user supplies an ONNX mo
 
 ## Operator support target
 
-The v1 planner supports the operators exercised by the frozen fixtures: Conv, ConvTranspose, Relu, Add, Sub, MaxPool, ReduceMean over spatial axes, Shape, Reshape, Transpose, MatMul, and Softmax. The independent-pixel schedule additionally validates inference-mode BatchNormalization, Sigmoid, and Mul. Initializers, broadcasting, and dynamic spatial dimensions are supported for the patterns in those fixtures. Other operator versions, layouts, axes, data types, and control-flow nodes require explicit compatibility checks. The tool must report the first unsupported node before inference and identify its operator and reason.
+The v1 planner supports the operators exercised by the frozen fixtures: Conv, ConvTranspose, Relu, Add, Sub, MaxPool, ReduceMean over spatial axes, Shape, Reshape, Transpose, MatMul, and Softmax. The independent-pixel and general local schedules additionally validate inference-mode BatchNormalization, Sigmoid, and Mul; the general local schedule validates channel-axis Concat. Initializers, broadcasting, and dynamic spatial dimensions are supported for the specified patterns. Other operator versions, layouts, axes, data types, and control-flow nodes require explicit compatibility checks. The tool must report the first unsupported node before inference and identify its operator and reason.
 
 Whole-image execution is the reference only for models whose declared inference contract permits the requested image dimensions. A model trained and intended for fixed patches may require a different reference and cannot be silently evaluated against whole-image output.
 

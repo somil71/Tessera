@@ -47,7 +47,8 @@ def _spatial_op(node, initializers):
     strides = _pair(attrs.get("strides", [1, 1]), f"{op} strides")
     dilations = _pair(attrs.get("dilations", [1, 1]), f"{op} dilations")
     if op in {"Conv", "ConvTranspose"}:
-        if len(node.input) < 2 or node.input[1] not in initializers:
+        if (len(node.input) not in (2, 3) or node.input[1] not in initializers
+            or (len(node.input) == 3 and node.input[2] not in initializers)):
             raise ValueError(f"{op} requires a constant kernel")
         weight = initializers[node.input[1]]
         if len(weight.dims) != 4:
@@ -56,6 +57,8 @@ def _spatial_op(node, initializers):
         if tuple(weight.dims[2:]) != kernel:
             raise ValueError(f"{op} kernel declaration differs from weights")
     else:
+        if len(node.input) != 1:
+            raise ValueError("MaxPool requires one spatial input")
         kernel = _pair(attrs.get("kernel_shape", []), "MaxPool kernel")
         if attrs.get("ceil_mode", 0) != 0 or len(node.output) != 1:
             raise ValueError("MaxPool ceil mode or index output is not modeled")
@@ -184,3 +187,65 @@ def analyze_local(model):
         halo.append(max(negative, positive))
     return LocalPlan(halo[0], halo[1], alignment[0], alignment[1],
                      tuple(node.op_type for node in graph.node))
+
+
+def local_channels(model):
+    """Return fixed input/output channel counts for a local raster graph."""
+    initializers = {item.name for item in model.graph.initializer}
+    inputs = [item for item in model.graph.input if item.name not in initializers]
+    if len(inputs) != 1 or len(model.graph.output) != 1:
+        raise ValueError("local raster needs one input and one output")
+    channels = []
+    for value in (inputs[0], model.graph.output[0]):
+        dims = value.type.tensor_type.shape.dim
+        if len(dims) != 4 or not dims[1].HasField("dim_value") or dims[1].dim_value < 1:
+            raise ValueError("local raster needs fixed positive channel counts")
+        if dims[0].HasField("dim_value") and dims[0].dim_value != 1:
+            raise ValueError("local raster needs batch size one")
+        if any(dims[axis].HasField("dim_value") for axis in (2, 3)):
+            raise ValueError("local raster needs dynamic spatial dimensions")
+        channels.append(dims[1].dim_value)
+    return tuple(channels)
+
+
+def local_output_shape(model, height, width):
+    """Calculate spatial output dimensions, rejecting inconsistent merges."""
+    if height < 1 or width < 1:
+        raise ValueError("local raster dimensions must be positive")
+    initializers = {item.name: item for item in model.graph.initializer}
+    inputs = [item for item in model.graph.input if item.name not in initializers]
+    shapes = {inputs[0].name: (height, width)}
+    for index, node in enumerate(model.graph.node):
+        data = [shapes[name] for name in node.input if name in shapes]
+        if not data or len(set(data)) != 1:
+            raise ValueError(f"node {index} has inconsistent spatial inputs")
+        shape = data[0]
+        if node.op_type in {"Conv", "ConvTranspose", "MaxPool"}:
+            kernel, strides, dilations, pads = _spatial_op(node, initializers)
+            result = []
+            for axis in range(2):
+                effective = dilations[axis]*(kernel[axis]-1)+1
+                if node.op_type == "ConvTranspose":
+                    length = (shape[axis]-1)*strides[axis]+effective-pads[axis]-pads[axis+2]
+                else:
+                    length = ((shape[axis]+pads[axis]+pads[axis+2]-effective)//strides[axis]+1)
+                if length < 1:
+                    raise ValueError(f"node {index} produces an empty spatial axis")
+                result.append(length)
+            shape = tuple(result)
+        shapes[node.output[0]] = shape
+    return shapes[model.graph.output[0].name]
+
+
+def validate_local_raster(model, height, width, cropped_shapes=()):
+    """Check dependency and same-size output for the raster and each tile shape."""
+    plan = analyze_local(model)
+    channels = local_channels(model)
+    if height % plan.alignment_y or width % plan.alignment_x:
+        raise ValueError("raster dimensions violate local graph alignment")
+    if local_output_shape(model, height, width) != (height, width):
+        raise ValueError("local graph output differs from input raster dimensions")
+    for shape in cropped_shapes:
+        if local_output_shape(model, *shape) != shape:
+            raise ValueError(f"local graph changes cropped tile shape {shape}")
+    return channels, plan
