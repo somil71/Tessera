@@ -1,0 +1,264 @@
+"""Fixed window schedule for pixelwise ONNX models on GeoTIFF rasters.
+
+Rasterio handles geospatial I/O. The Rust CLI performs each tile's ONNX execution.
+This is a bounded development path, not the memory-limited planner.
+"""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import time
+from uuid import uuid4
+
+import numpy as np
+import onnx
+from onnx import TensorProto, helper
+import rasterio
+from rasterio.windows import Window
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EXE = ROOT / "target" / "debug" / "raster-compiler.exe"
+DEFAULT_DLL = (
+    ROOT / ".venv" / "Lib" / "site-packages" / "onnxruntime" / "capi" / "onnxruntime.dll"
+)
+
+
+def arguments():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cut-after", type=int, required=True)
+    parser.add_argument("--tile-size", type=int, default=256)
+    parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--band-order", help="Comma-separated 1-based source band indexes")
+    parser.add_argument("--scale", type=float, default=1.0)
+    parser.add_argument("--offset", type=float, default=0.0)
+    parser.add_argument("--exe", type=Path, default=DEFAULT_EXE)
+    parser.add_argument("--ort-dll", type=Path, default=DEFAULT_DLL)
+    parser.add_argument("--overwrite", action="store_true")
+    return parser.parse_args()
+
+
+def model_contract(path, tile_size):
+    model = onnx.load(path)
+    onnx.checker.check_model(model)
+    graph = model.graph
+    initializers = {item.name: item for item in graph.initializer}
+    inputs = [item for item in graph.input if item.name not in initializers]
+    if len(inputs) != 1 or len(graph.output) != 1:
+        raise ValueError("model needs one image input and one raster output")
+    for value in (inputs[0], graph.output[0]):
+        tensor = value.type.tensor_type
+        if tensor.elem_type != TensorProto.FLOAT or len(tensor.shape.dim) != 4:
+            raise ValueError(f"{value.name} must be NCHW FP32")
+        dims = tensor.shape.dim
+        if dims[0].HasField("dim_value") and dims[0].dim_value != 1:
+            raise ValueError(f"{value.name} must have batch size 1")
+        for axis in (2, 3):
+            if dims[axis].HasField("dim_value") and dims[axis].dim_value != tile_size:
+                raise ValueError(f"{value.name} has a fixed spatial size incompatible with tile size")
+    input_channels = inputs[0].type.tensor_type.shape.dim[1].dim_value
+    output_channels = graph.output[0].type.tensor_type.shape.dim[1].dim_value
+    if input_channels < 1 or output_channels < 1:
+        raise ValueError("input and output channel counts must be fixed positive values")
+    for index, node in enumerate(graph.node):
+        attrs = {attr.name: helper.get_attribute_value(attr) for attr in node.attribute}
+        if node.op_type == "Conv":
+            weight = initializers.get(node.input[1]) if len(node.input) > 1 else None
+            if (
+                weight is None
+                or tuple(weight.dims[2:]) != (1, 1)
+                or attrs.get("kernel_shape", [1, 1]) != [1, 1]
+                or attrs.get("strides", [1, 1]) != [1, 1]
+                or attrs.get("dilations", [1, 1]) != [1, 1]
+                or attrs.get("pads", [0, 0, 0, 0]) != [0, 0, 0, 0]
+                or attrs.get("auto_pad", b"NOTSET") != b"NOTSET"
+                or attrs.get("group", 1) != 1
+            ):
+                raise ValueError(f"node {index} Conv is not a supported pointwise convolution")
+        elif node.op_type in {"Relu", "Identity"}:
+            continue
+        elif node.op_type in {"Add", "Sub"}:
+            for name in node.input:
+                if name in initializers:
+                    dims = list(initializers[name].dims)
+                    if len(dims) > 4 or any(dim != 1 for dim in dims[-2:]):
+                        raise ValueError(f"node {index} uses a spatially varying constant")
+        else:
+            raise ValueError(f"node {index} ({node.op_type}) is not independent across pixels")
+    return input_channels, output_channels
+
+
+def execute(command, env):
+    result = subprocess.run(command, env=env, text=True, capture_output=True)
+    if result.returncode:
+        raise RuntimeError(
+            f"command failed ({result.returncode}): {command}\n{result.stdout}\n{result.stderr}"
+        )
+    return result.stdout
+
+
+def run(args):
+    started = time.perf_counter()
+    model = args.model.resolve(strict=True)
+    source = args.input.resolve(strict=True)
+    output = args.output.resolve()
+    if output in {model, source}:
+        raise ValueError("output must differ from model and input")
+    if output.exists() and not args.overwrite:
+        raise FileExistsError(f"output already exists: {output}; pass --overwrite to replace it")
+    if args.tile_size < 1 or args.threads < 1 or args.cut_after < 0:
+        raise ValueError("tile size and threads must be positive; cut index must be nonnegative")
+    if not np.isfinite(args.scale) or not np.isfinite(args.offset):
+        raise ValueError("scale and offset must be finite")
+    input_channels, output_channels = model_contract(model, args.tile_size)
+    exe = args.exe.resolve(strict=True)
+    dll = args.ort_dll.resolve(strict=True)
+    env = os.environ.copy()
+    env["ORT_DYLIB_PATH"] = str(dll)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    work = output.parent / f".{output.stem}.work-{uuid4().hex}"
+    work.mkdir()
+    temporary_output = output.parent / f".{output.stem}.partial-{uuid4().hex}.tif"
+    report_path = output.with_suffix(".report.json")
+    tile_input = work / "tile.f32"
+    tile_output = work / "scores.f32"
+    head = work / "head.onnx"
+    tail = work / "tail.onnx"
+    tiles = 0
+    max_child_commit = 0
+    raw_bridge_bytes = 0
+    try:
+        execute(
+            [
+                exe,
+                "split",
+                model,
+                "--cut-after",
+                str(args.cut_after),
+                "--height",
+                str(args.tile_size),
+                "--width",
+                str(args.tile_size),
+                "--out-dir",
+                work,
+            ],
+            env,
+        )
+        with rasterio.open(source) as src:
+            if src.crs is None:
+                raise ValueError("input GeoTIFF has no CRS")
+            if src.count != input_channels:
+                raise ValueError(f"model requires {input_channels} bands, raster has {src.count}")
+            if args.band_order:
+                bands = tuple(int(part) for part in args.band_order.split(","))
+            else:
+                bands = tuple(range(1, input_channels + 1))
+            if sorted(bands) != list(range(1, input_channels + 1)):
+                raise ValueError("band order must be a permutation of the source bands")
+            profile = {
+                "driver": "GTiff",
+                "width": src.width,
+                "height": src.height,
+                "count": output_channels,
+                "dtype": "float32",
+                "crs": src.crs,
+                "transform": src.transform,
+                "nodata": None,
+                "compress": "deflate",
+                "predictor": 3,
+                "BIGTIFF": "IF_SAFER",
+            }
+            with rasterio.open(temporary_output, "w", **profile) as dst:
+                dst.update_tags(**src.tags())
+                for band in range(1, output_channels + 1):
+                    dst.set_band_description(band, f"score_{band}")
+                for row in range(0, src.height, args.tile_size):
+                    for col in range(0, src.width, args.tile_size):
+                        height = min(args.tile_size, src.height - row)
+                        width = min(args.tile_size, src.width - col)
+                        window = Window(col, row, width, height)
+                        if np.any(src.read_masks(window=window) != 255):
+                            raise ValueError(f"no-data pixel in window at row {row}, col {col}")
+                        actual = src.read(indexes=bands, window=window, out_dtype="float32")
+                        if not np.isfinite(actual).all():
+                            raise ValueError(f"non-finite input pixel in window at row {row}, col {col}")
+                        tile = np.zeros(
+                            (input_channels, args.tile_size, args.tile_size), dtype=np.float32
+                        )
+                        tile[:, :height, :width] = actual * args.scale + args.offset
+                        tile.tofile(tile_input)
+                        stdout = execute(
+                            [
+                                exe,
+                                "run-split",
+                                head,
+                                tail,
+                                "--input-f32",
+                                tile_input,
+                                "--output-f32",
+                                tile_output,
+                                "--channels",
+                                str(input_channels),
+                                "--height",
+                                str(args.tile_size),
+                                "--width",
+                                str(args.tile_size),
+                                "--threads",
+                                str(args.threads),
+                            ],
+                            env,
+                        )
+                        metrics = next(
+                            line for line in stdout.splitlines() if line.startswith("mode=split")
+                        )
+                        metric = dict(part.split("=", 1) for part in metrics.split())
+                        max_child_commit = max(
+                            max_child_commit, int(metric["peak_commit_bytes"])
+                        )
+                        expected = output_channels * args.tile_size * args.tile_size
+                        scores = np.fromfile(tile_output, dtype="<f4")
+                        if scores.size != expected:
+                            raise ValueError(f"Rust produced {scores.size} scores, expected {expected}")
+                        scores = scores.reshape(output_channels, args.tile_size, args.tile_size)
+                        dst.write(scores[:, :height, :width], window=window)
+                        tiles += 1
+                        raw_bridge_bytes += tile_input.stat().st_size + tile_output.stat().st_size
+        os.replace(temporary_output, output)
+        report = {
+            "model": str(model),
+            "input": str(source),
+            "output": str(output),
+            "shape": [src.height, src.width],
+            "input_bands": input_channels,
+            "score_bands": output_channels,
+            "crs": str(src.crs),
+            "transform": list(src.transform),
+            "tile_size": args.tile_size,
+            "tile_count": tiles,
+            "cut_after": args.cut_after,
+            "band_order": bands,
+            "scale": args.scale,
+            "offset": args.offset,
+            "elapsed_seconds": time.perf_counter() - started,
+            "max_child_peak_commit_bytes": max_child_commit,
+            "raw_bridge_bytes": raw_bridge_bytes,
+            "numerical_error": None,
+            "memory_limit_enforced": False,
+            "notes": "Child peak excludes this Python raster scheduler; input/output bridge uses raw files.",
+        }
+        report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        print(f"wrote {output} and {report_path}; {tiles} tiles")
+    finally:
+        temporary_output.unlink(missing_ok=True)
+        for path in (tile_input, tile_output, head, tail):
+            path.unlink(missing_ok=True)
+        work.rmdir()
+
+
+if __name__ == "__main__":
+    run(arguments())
