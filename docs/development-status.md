@@ -57,6 +57,7 @@ Two deterministic 8192×8192 three-band development GeoTIFFs now exercise the ac
 - The output report has no numerical error estimate for an arbitrary user raster because a whole-image reference may not fit. The test harness calculates error on small reference cases.
 - There is no independent user trial, real remote-sensing model/raster trial, tuned manual baseline, held-out 1 GiB run, or second physical machine. The originally designated attention holdout was exposed during development; [evaluation amendment 1](evaluation-amendment-1.md) requires a new independent holdout. The frozen feasibility decision has not been made.
 - An [alternated benchmark runner](evaluation-runner.md) now preserves paired automatic/manual runs and their outputs, but its smoke test used one repeat and an untuned development schedule. The required five repeats, four-hour tuning history, independent holdout, and decision are outstanding.
+- A [Windows quickstart](windows-quickstart.md) and `scripts/doctor.py` now check the pinned environment and basic model/raster compatibility. They have been exercised on this development machine, not a clean independent installation.
 
 ## Next execution plan
 
