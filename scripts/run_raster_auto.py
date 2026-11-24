@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+import gc
 import json
 import math
 import os
@@ -30,6 +31,8 @@ from run_raster_unet import Worker, run as run_unet, validate_model as validate_
 DISK_PROBE_MIN_EXPECTED_RUNTIME_SECONDS = 10.0
 RAM_SLOW_TILE_FACTOR = 1.5
 RAM_SLOW_TILE_STREAK = 2
+MAX_LARGE_GRAPH_CUTS = 4
+LARGE_PROBE_PIXELS = 1_048_576
 
 
 def arguments():
@@ -109,6 +112,48 @@ def candidate_tiles(height, width, maximum, family):
     return sizes
 
 
+def candidate_cuts(model, family):
+    """Sample large local graphs at data stages; preserve exhaustive small graphs."""
+    count = len(model.graph.node)
+    if count < 2:
+        return []
+    if family != "local_graph" or count <= 32:
+        return list(range(count - 1))
+    spatial = {"Conv", "ConvTranspose", "MaxPool", "Resize", "MatMul",
+               "Softmax", "ReduceMean"}
+    data_nodes = [index for index, node in enumerate(model.graph.node[:-1])
+                  if node.op_type in spatial]
+    if not data_nodes:
+        data_nodes = list(range(count-1))
+    selected = {0, count-2}
+    resize_nodes = [index for index, node in enumerate(model.graph.node[:-1])
+                    if node.op_type == "Resize"]
+    if resize_nodes:
+        selected.add(resize_nodes[0])
+        before = next((candidate for candidate in reversed(data_nodes)
+                       if candidate < resize_nodes[0]), None)
+        if before is not None:
+            selected.add(before)
+    for fraction in (8, 4, 12, 2, 6, 10, 14, 1, 3, 5, 7, 9, 11, 13, 15):
+        if len(selected) >= MAX_LARGE_GRAPH_CUTS:
+            break
+        selected.add(data_nodes[round(fraction*(len(data_nodes)-1)/16)])
+    return sorted(selected)
+
+
+def unique_probe_tiles(tiles, height, width, local_plan):
+    """Retain the largest tile for each halo-expanded probe shape."""
+    seen = set()
+    selected = []
+    for tile in tiles:
+        shape = (min(height, tile+2*local_plan.halo_y),
+                 min(width, tile+2*local_plan.halo_x))
+        if shape not in seen:
+            selected.append(tile)
+            seen.add(shape)
+    return selected
+
+
 def worker_shape_count(height, width, tile, family, local_plan=None):
     if family not in {"local_unet", "local_graph"}:
         return 1
@@ -135,6 +180,8 @@ def profile_candidate(model, directory, family, tile, cut, channels, scores,
              if family in {"local_unet", "local_graph"} else (tile, tile))
     candidate = dict(tile_size=tile, cut_after=cut, storage_mode=storage_mode,
                      probe_shape=list(shape),
+                     timed_probe_repetitions=(1 if shape[0]*shape[1] > LARGE_PROBE_PIXELS
+                                              else 3),
                      tile_count=math.ceil(height/tile)*math.ceil(width/tile),
                      worker_shape_count=worker_shape_count(
                          height, width, tile, family, local_plan))
@@ -148,7 +195,7 @@ def profile_candidate(model, directory, family, tile, cut, channels, scores,
         worker.infer(tile_data, scores)
         durations = []
         metric = None
-        for _ in range(3):
+        for _ in range(candidate["timed_probe_repetitions"]):
             began = time.perf_counter()
             _, metric = worker.infer(tile_data, scores)
             durations.append((time.perf_counter()-began)*1000)
@@ -265,19 +312,30 @@ def run(args):
                       generated_model, 16)
             probe_model = generated_model
         tiles = candidate_tiles(height, width, args.max_tile_size, family)
+        equivalent_tiles = []
         if local_plan is not None:
             tiles = [tile for tile in tiles if tile % local_plan.alignment_y == 0
                      and tile % local_plan.alignment_x == 0]
             if not tiles:
                 raise ValueError("maximum tile size is below local graph alignment")
-        cuts = range(len(model.graph.node)-1)
+            original_tiles = tiles
+            tiles = unique_probe_tiles(tiles, height, width, local_plan)
+            equivalent_tiles = [tile for tile in original_tiles if tile not in tiles]
+        cuts = candidate_cuts(model, family)
         if family == "global_mean":
             cuts = (0,)
+        node_count = len(model.graph.node)
+        sampled_cuts = len(cuts) < node_count-1 and family == "local_graph"
+        if family in {"local_unet", "local_graph"}:
+            del model
+            gc.collect()
         probed_disk_tiles = set()
         probed_ram_tiles = set()
         attempted_plans = set()
         ram_search_stopped_after = None
-        rounds = 3 if local_plan is not None else 2
+        restored_equivalent_tiles = []
+        rounds = (3 + int(sampled_cuts) + int(bool(equivalent_tiles))
+                  if local_plan is not None else 2)
         for round_index in range(rounds):
             if round_index == 0:
                 slow_tile_streak = 0
@@ -292,6 +350,18 @@ def run(args):
                             "memory", local_plan)
                         trials.append(trial)
                         tile_trials.append(trial)
+                        if sampled_cuts and trial["status"] != "ok":
+                            disk_trial = profile_candidate(
+                                probe_model, work / f"tile_{tile}_cut_{cut}_disk",
+                                family, tile, cut, channels, scores, height,
+                                width, exe, env, args.threads, job, "disk",
+                                local_plan)
+                            trials.append(disk_trial)
+                            tile_trials.append(disk_trial)
+                            probed_disk_tiles.add(tile)
+                        if sampled_cuts and any(item["status"] == "ok"
+                                                for item in tile_trials):
+                            break
                     feasible_ram = [trial for trial in trials
                                     if trial["storage_mode"] == "memory" and
                                     trial["status"] == "ok"]
@@ -309,18 +379,21 @@ def run(args):
                     if slow_tile_streak >= RAM_SLOW_TILE_STREAK:
                         ram_search_stopped_after = tile
                         break
+                    if sampled_cuts and feasible_tile:
+                        break
                 if local_plan is not None:
                     ram_ok = [trial for trial in trials if trial["status"] == "ok"]
                     best_ram = (min(ram_ok, key=lambda trial:
                                 trial["predicted_execution_seconds"])
                                 if ram_ok else None)
                     if best_ram is None:
-                        disk_tiles = list(tiles)
+                        disk_tiles = [tile for tile in tiles if tile not in probed_disk_tiles]
                     elif (args.explore_spill or
                           best_ram["predicted_execution_seconds"] >=
                           DISK_PROBE_MIN_EXPECTED_RUNTIME_SECONDS):
                         disk_tiles = [tile for tile in tiles
-                                      if tile > best_ram["tile_size"]]
+                                      if tile > best_ram["tile_size"]
+                                      and tile not in probed_disk_tiles]
                     else:
                         disk_tiles = []
                 else:
@@ -339,8 +412,35 @@ def run(args):
                             scores, height, width, exe, env, args.threads, job,
                             "memory", local_plan))
                 disk_tiles = []
-            else:
+            elif round_index == 2:
                 disk_tiles = [tile for tile in tiles if tile not in probed_disk_tiles]
+            elif round_index == 3 and sampled_cuts:
+                # Only reached when sampled structural cuts found no full run.
+                # Search every remaining graph cut before declaring no plan.
+                remaining = [cut for cut in range(node_count-1)
+                             if cut not in cuts]
+                for tile in tiles:
+                    for cut in remaining:
+                        for storage_mode in ("memory", "disk"):
+                            directory = work / f"tile_{tile}_cut_{cut}_{storage_mode}"
+                            trials.append(profile_candidate(
+                                probe_model, directory, family, tile, cut,
+                                channels, scores, height, width, exe, env,
+                                args.threads, job, storage_mode, local_plan))
+                disk_tiles = []
+            else:
+                # Probe smaller tiles with the same maximum halo window only
+                # after every larger full-raster attempt has failed.
+                restored_equivalent_tiles = list(equivalent_tiles)
+                for tile in equivalent_tiles:
+                    for cut in range(node_count-1):
+                        for storage_mode in ("memory", "disk"):
+                            directory = work / f"tile_{tile}_cut_{cut}_{storage_mode}"
+                            trials.append(profile_candidate(
+                                probe_model, directory, family, tile, cut,
+                                channels, scores, height, width, exe, env,
+                                args.threads, job, storage_mode, local_plan))
+                disk_tiles = []
             for tile in disk_tiles:
                 probed_disk_tiles.add(tile)
                 for cut in cuts:
@@ -390,8 +490,11 @@ def run(args):
         report_path = output.with_suffix(".report.json")
         report = json.loads(report_path.read_text(encoding="utf-8"))
         report.update(strategy=f"auto-{family}",
-                      selection_rule="Profile RAM plans from large to small; stop after two smaller tile sizes each predict over 1.5 times the best runtime. If the fastest predicted RAM run is at least 10 s, profile larger local-graph spill tiles. Rank measured plans by predicted runtime; within 10%, prefer fewer tiles. If all full runs fail, profile remaining RAM tiles, then remaining disk tiles",
+                      selection_rule="Profile RAM plans from large to small; stop after two smaller tile sizes each predict over 1.5 times the best runtime. For local graphs over 32 nodes, defer smaller tiles with an identical halo-expanded probe shape, sample structural cuts, try disk after each failed RAM probe, and execute the first feasible large-graph candidate to limit calibration cost. If sampled plans fail, search all remaining cuts and then restore deferred tile sizes. Profile larger spill tiles for smaller graphs when the fastest predicted RAM run is at least 10 s. Probes over one million pixels use one timed repetition after warmup. Rank measured plans by predicted runtime; within 10%, prefer fewer tiles",
                       ram_search_stopped_after_tile=ram_search_stopped_after,
+                      cut_candidates=list(cuts),
+                      equivalent_probe_tile_sizes_skipped=equivalent_tiles,
+                      equivalent_probe_tile_sizes_restored=restored_equivalent_tiles,
                       unprobed_ram_tile_sizes=[tile for tile in tiles
                                                if tile not in probed_ram_tiles],
                       planning_seconds=time.perf_counter()-started-report["elapsed_seconds"],
