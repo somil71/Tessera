@@ -56,7 +56,8 @@ def model_family(model_path, model):
     supported_ops = {"Conv", "ConvTranspose", "Relu", "Identity", "Sigmoid",
                      "BatchNormalization", "Add", "Sub", "Mul", "Concat",
                      "MaxPool", "ReduceMean", "Shape", "Reshape", "Transpose",
-                     "MatMul", "Softmax"}
+                     "MatMul", "Softmax", "Constant", "Gather", "Unsqueeze",
+                     "Slice", "Cast", "Resize"}
     for index, node in enumerate(model.graph.node):
         if node.op_type not in supported_ops:
             raise ValueError(

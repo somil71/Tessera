@@ -81,6 +81,7 @@ def check(args):
             try:
                 import onnx
                 import rasterio
+                from local_graph import validate_local_raster
                 from run_raster_auto import model_family
 
                 model_path = args.model.resolve(strict=True)
@@ -111,6 +112,8 @@ def check(args):
                     errors.append(f"model needs {channels} bands; raster has {raster_checks['bands']}")
                 if family == "local_unet" and any(size % 2 for size in shape):
                     errors.append("supported U-Net requires even raster dimensions")
+                if family == "local_graph":
+                    validate_local_raster(model, *shape)
                 checks["model"] = dict(path=str(model_path), family=family,
                                        input_bands=channels, score_bands=scores)
                 checks["uncompressed_fp32_output_bytes"] = (

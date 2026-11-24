@@ -14,6 +14,7 @@ from onnx import TensorProto, helper
 
 POINTWISE = {"Relu", "Identity", "Sigmoid", "BatchNormalization",
              "Add", "Sub", "Mul"}
+SHAPE_ONLY = {"Constant", "Gather", "Unsqueeze", "Slice", "Cast"}
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,57 @@ def _spatial_op(node, initializers):
     return kernel, strides, dilations, pads
 
 
+def _concrete_shapes(model, height, width):
+    """Infer tensor shapes with a concrete batch-one image, without executing it."""
+    concrete = onnx.ModelProto()
+    concrete.CopyFrom(model)
+    initializers = {item.name for item in concrete.graph.initializer}
+    inputs = [item for item in concrete.graph.input if item.name not in initializers]
+    if len(inputs) != 1:
+        raise ValueError("concrete shape inference needs one image input")
+    dims = inputs[0].type.tensor_type.shape.dim
+    if len(dims) != 4:
+        raise ValueError("concrete shape inference needs NCHW input")
+    for axis, value in ((0, 1), (2, height), (3, width)):
+        dims[axis].ClearField("dim_param")
+        dims[axis].dim_value = value
+    inferred = onnx.shape_inference.infer_shapes(concrete, data_prop=True)
+    shapes = {}
+    for value in (*inferred.graph.input, *inferred.graph.value_info,
+                  *inferred.graph.output):
+        dims = value.type.tensor_type.shape.dim
+        if len(dims) == 4 and all(dim.HasField("dim_value") and dim.dim_value > 0
+                                  for dim in dims):
+            shapes[value.name] = tuple(dim.dim_value for dim in dims)
+    return shapes
+
+
+def _resize_factors(node, shape_sets):
+    attrs = _attrs(node)
+    if (attrs.get("mode", b"nearest") != b"nearest"
+            or attrs.get("coordinate_transformation_mode", b"half_pixel") != b"asymmetric"
+            or attrs.get("nearest_mode", b"round_prefer_floor") != b"floor"
+            or set(attrs) - {"mode", "coordinate_transformation_mode", "nearest_mode",
+                             "cubic_coeff_a"}):
+        raise ValueError("Resize requires nearest/asymmetric/floor semantics")
+    if len(node.input) != 4 or node.input[1:3] != ["", ""] or not node.input[3]:
+        raise ValueError("Resize requires a dynamic sizes input only")
+    factors = None
+    for shapes in shape_sets:
+        source, target = shapes.get(node.input[0]), shapes.get(node.output[0])
+        if source is None or target is None or source[:2] != target[:2]:
+            raise ValueError("Resize spatial input/output shapes were not inferred")
+        if any(target[axis] % source[axis] for axis in (2, 3)):
+            raise ValueError("Resize needs an integer spatial upsample factor")
+        sample = tuple(target[axis] // source[axis] for axis in (2, 3))
+        if any(factor < 2 for factor in sample):
+            raise ValueError("Resize must upsample both spatial axes")
+        if factors is not None and factors != sample:
+            raise ValueError("Resize factor changed across aligned input sizes")
+        factors = sample
+    return factors
+
+
 def analyze_local(model):
     """Return halo and phase alignment for a same-resolution local graph."""
     onnx.checker.check_model(model)
@@ -90,6 +142,8 @@ def analyze_local(model):
             raise ValueError("local analysis requires NCHW FP32 tensors")
     image = inputs[0].name
     output = graph.output[0].name
+    resize_shape_sets = ([_concrete_shapes(model, side, side) for side in (128, 256)]
+                         if any(node.op_type == "Resize" for node in graph.node) else [])
     steps = {image: (1, 1)}
     node_specs = []
     alignment = [1, 1]
@@ -100,12 +154,21 @@ def analyze_local(model):
             raise ValueError(f"node {index} has unmodeled outputs")
         op = node.op_type
         data_inputs = [name for name in node.input if name in steps]
+        if op == "Shape":
+            if len(node.input) != 1 or _attrs(node):
+                raise ValueError(f"node {index} Shape has unmodeled inputs or attributes")
+            continue
+        if op in SHAPE_ONLY or (op == "Concat" and _attrs(node).get("axis") == 0):
+            if data_inputs:
+                raise ValueError(f"node {index} ({op}) applies shape-only logic to image values")
+            continue
         if not data_inputs:
             raise ValueError(f"node {index} ({op}) has no image-dependent input")
         if len({steps[name] for name in data_inputs}) != 1:
             raise ValueError(f"node {index} ({op}) merges different spatial scales")
         step = steps[data_inputs[0]]
         spec = None
+        resize_factor = None
         if op in {"Conv", "ConvTranspose", "MaxPool"}:
             if node.input[0] not in steps:
                 raise ValueError(f"node {index} ({op}) has no spatial input")
@@ -131,6 +194,8 @@ def analyze_local(model):
                 if len(node.input) != 2 or attrs:
                     raise ValueError(f"node {index} ({op}) has unmodeled arity or attributes")
                 for name in node.input:
+                    if name not in steps and name not in initializers:
+                        raise ValueError(f"node {index} ({op}) has an unmodeled nonconstant input")
                     if name in initializers:
                         dims = list(initializers[name].dims)
                         if len(dims) > 4 or any(dim != 1 for dim in dims[-2:]):
@@ -142,16 +207,24 @@ def analyze_local(model):
             if _attrs(node) != {"axis": 1} or len(data_inputs) != len(node.input):
                 raise ValueError("only channel-axis Concat is local")
             next_step = step
+        elif op == "Resize":
+            if list(node.input[:1]) != [data_inputs[0]] or len(data_inputs) != 1:
+                raise ValueError(f"node {index} Resize needs one spatial input")
+            resize_factor = _resize_factors(node, resize_shape_sets)
+            if any(step[axis] % resize_factor[axis] for axis in range(2)):
+                raise ValueError(f"node {index} Resize has fractional image phase")
+            next_step = tuple(step[axis] // resize_factor[axis] for axis in range(2))
+            alignment = [math.lcm(alignment[axis], step[axis]) for axis in range(2)]
         else:
             raise ValueError(f"node {index} ({op}) has no modeled local dependency")
         steps[node.output[0]] = next_step
-        node_specs.append((node, data_inputs, spec))
+        node_specs.append((node, data_inputs, spec, resize_factor))
     if steps.get(output) != (1, 1):
         raise ValueError("output must have the input spatial resolution")
 
     def dependency(axis, pixel):
         needed = {output: (pixel, pixel + 1)}
-        for node, data_inputs, spec in reversed(node_specs):
+        for node, data_inputs, spec, resize_factor in reversed(node_specs):
             interval = needed.pop(node.output[0], None)
             if interval is None:
                 continue
@@ -165,6 +238,9 @@ def analyze_local(model):
                 else:
                     low, high = (low*stride - pad,
                                  (high-1)*stride - pad + (kernel[axis]-1)*dilation + 1)
+            elif resize_factor is not None:
+                factor = resize_factor[axis]
+                low, high = low // factor, (high-1) // factor + 1
             for name in data_inputs:
                 old = needed.get(name)
                 needed[name] = (min(old[0], low), max(old[1], high)) if old else (low, high)
@@ -184,7 +260,8 @@ def analyze_local(model):
                 raise ValueError("spatial dependency is not translation-periodic")
             negative = max(negative, pixel - low)
             positive = max(positive, high - pixel - 1)
-        halo.append(max(negative, positive))
+        radius = max(negative, positive)
+        halo.append(((radius + period - 1) // period) * period)
     return LocalPlan(halo[0], halo[1], alignment[0], alignment[1],
                      tuple(node.op_type for node in graph.node))
 
@@ -212,6 +289,18 @@ def local_output_shape(model, height, width):
     """Calculate spatial output dimensions, rejecting inconsistent merges."""
     if height < 1 or width < 1:
         raise ValueError("local raster dimensions must be positive")
+    if any(node.op_type == "Resize" for node in model.graph.node):
+        shapes = _concrete_shapes(model, height, width)
+        for index, node in enumerate(model.graph.node):
+            if node.op_type == "Resize":
+                try:
+                    _resize_factors(node, [shapes])
+                except ValueError as error:
+                    raise ValueError(f"node {index} Resize shape invalid: {error}") from error
+        output = shapes.get(model.graph.output[0].name)
+        if output is None:
+            raise ValueError("local raster output shape was not inferred")
+        return output[2:]
     initializers = {item.name: item for item in model.graph.initializer}
     inputs = [item for item in model.graph.input if item.name not in initializers]
     shapes = {inputs[0].name: (height, width)}
