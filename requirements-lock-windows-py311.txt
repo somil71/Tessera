@@ -1,0 +1,17 @@
+# Resolved on Windows x64 / Python 3.11 during the 2026-11-24 clean-checkout run.
+affine==3.0.1
+attrs==26.1.0
+certifi==2026.11.20
+click==8.5.1
+click-plugins==1.1.1.2
+cligj==0.7.2
+flatbuffers==25.12.19
+ml_dtypes==0.7.0
+numpy==2.4.6
+onnx==1.23.2
+onnxruntime==1.31.0
+packaging==26.4
+protobuf==7.36.2
+pyparsing==3.3.3
+rasterio==1.4.4
+typing_extensions==4.16.0

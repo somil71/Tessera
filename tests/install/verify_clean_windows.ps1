@@ -28,7 +28,7 @@ try {
     try {
         Invoke-Checked $PythonLauncher @("-3.11", "-m", "venv", ".venv")
         $Python = Join-Path $Checkout ".venv\Scripts\python.exe"
-        Invoke-Checked $Python @("-m", "pip", "install", "-r", "requirements-dev.txt")
+        Invoke-Checked $Python @("-m", "pip", "install", "-r", "requirements-lock-windows-py311.txt")
         Invoke-Checked cargo @("build", "--locked")
         Invoke-Checked $Python @("tests\fixtures\create_eval_models.py")
         Invoke-Checked $Python @("tests\fixtures\create_pointwise_model.py")

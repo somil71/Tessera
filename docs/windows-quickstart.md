@@ -8,7 +8,7 @@ From the repository root in PowerShell:
 
 ```powershell
 py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-lock-windows-py311.txt
 cargo build --locked
 .\.venv\Scripts\python.exe scripts\doctor.py
 ```
