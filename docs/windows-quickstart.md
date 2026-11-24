@@ -11,7 +11,7 @@ cargo build --locked
 .\.venv\Scripts\python.exe scripts\doctor.py
 ```
 
-The doctor checks Python x64 and pinned package versions, the Rust executable, and the ONNX Runtime DLL used by Rust. The Python runners set the Rust runtime's DLL path automatically. If `py -3.11` is unavailable, install Python 3.11 x64 and rerun the commands. `cargo build --locked` requires Cargo on `PATH`.
+The doctor checks Python x64 and pinned package versions, the Rust executable, and the ONNX Runtime DLL used by Rust. With a model and raster, its report records their hashes, tensor shapes, operator counts, and raster metadata even when compatibility fails. The Python runners set the Rust runtime's DLL path automatically. If `py -3.11` is unavailable, install Python 3.11 x64 and rerun the commands. `cargo build --locked` requires Cargo on `PATH`.
 
 For a supported ONNX model and georeferenced GeoTIFF, run preflight and then automatic inference:
 
