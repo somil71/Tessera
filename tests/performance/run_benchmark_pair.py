@@ -57,6 +57,77 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def validate_tuning_manifest(path, args, model_hash, input_hash, cap):
+    try:
+        tuning = read_json(path)
+    except (ValueError, UnicodeError):
+        if args.repeats >= 5:
+            raise ValueError("five-repeat evaluation requires a structured tuning manifest")
+        return False
+    if not isinstance(tuning, dict) or tuning.get("schema") != "raster-compiler-manual-tuning-v1":
+        if args.repeats >= 5:
+            raise ValueError("five-repeat evaluation requires a v1 tuning manifest")
+        return False
+    selected = tuning.get("selected_schedule", {})
+    attempts = tuning.get("attempts", [])
+    selected_attempt = next((item for item in attempts
+                             if item.get("index") == tuning.get("selected_attempt_index")),
+                            None)
+    def artifact_matches(file_path, expected_hash):
+        return (isinstance(file_path, str) and isinstance(expected_hash, str) and
+                Path(file_path).is_file() and sha256(Path(file_path)) == expected_hash)
+
+    expected = dict(tile_size=args.baseline_tile_size,
+                    cut_after=args.baseline_cut_after,
+                    threads=args.baseline_threads,
+                    storage_mode=args.baseline_storage_mode)
+    checks = [
+        tuning.get("status") == "completed",
+        tuning.get("model_sha256") == model_hash,
+        tuning.get("input_sha256") == input_hash,
+        tuning.get("family") == args.family,
+        tuning.get("memory_limit_bytes") == cap,
+        tuning.get("max_threads") == args.max_threads,
+        tuning.get("band_order") == args.band_order,
+        tuning.get("scale") == args.scale,
+        tuning.get("offset") == args.offset,
+        selected == expected,
+        tuning.get("selected_attempt_index") is not None,
+        selected_attempt is not None and selected_attempt.get("status") == "valid" and
+            selected_attempt.get("schedule") == expected,
+        isinstance(attempts, list) and
+            len(attempts) <= len(tuning.get("declared_candidates", [])),
+        artifact_matches(tuning.get("candidate_file"),
+                         tuning.get("candidate_file_sha256")),
+        artifact_matches(tuning.get("reference_raster"),
+                         tuning.get("reference_sha256")),
+        all(item.get("schedule") == tuning.get("declared_candidates", [])[index] and
+            artifact_matches(str(path.parent / item.get("process_record", "")),
+                             item.get("process_record_sha256"))
+            for index, item in enumerate(attempts)
+            if index < len(tuning.get("declared_candidates", []))),
+    ]
+    if selected_attempt is not None:
+        checks.extend([
+            artifact_matches(selected_attempt.get("output"),
+                             selected_attempt.get("output_sha256")),
+            artifact_matches(selected_attempt.get("report"),
+                             selected_attempt.get("report_sha256")),
+            artifact_matches(selected_attempt.get("comparison"),
+                             selected_attempt.get("comparison_sha256")),
+        ])
+    if args.repeats >= 5:
+        checks.extend([
+            tuning.get("time_allowance_minutes") == 240,
+            tuning.get("allowance_exceeded") is False,
+            isinstance(tuning.get("elapsed_seconds"), (int, float)) and
+                tuning["elapsed_seconds"] <= 240*60,
+        ])
+    if not all(checks):
+        raise ValueError("tuning manifest does not match the frozen benchmark pair")
+    return True
+
+
 def invoke(command, record_path):
     started = time.perf_counter()
     result = subprocess.run([str(item) for item in command],
@@ -85,15 +156,20 @@ def run(args):
         raise ValueError("tile sizes must be at least two")
     out.mkdir(parents=True, exist_ok=True)
     cap = args.memory_limit_mib * 1024 * 1024
+    model_hash = sha256(model)
+    input_hash = sha256(source)
+    tuning_manifest_validated = validate_tuning_manifest(
+        tuning_log, args, model_hash, input_hash, cap)
     shared = ["--model", str(model), "--input", str(source),
               "--memory-limit-mib", str(args.memory_limit_mib),
               "--scale", str(args.scale), "--offset", str(args.offset)]
     if args.band_order:
         shared.extend(["--band-order", args.band_order])
-    manifest = dict(status="running", model=str(model), model_sha256=sha256(model),
-                    input=str(source), input_sha256=sha256(source),
+    manifest = dict(status="running", model=str(model), model_sha256=model_hash,
+                    input=str(source), input_sha256=input_hash,
                     baseline_tuning_log=str(tuning_log),
                     baseline_tuning_log_sha256=sha256(tuning_log),
+                    tuning_manifest_validated=tuning_manifest_validated,
                     family=args.family, memory_limit_bytes=cap,
                     max_threads=args.max_threads,
                     auto_threads=args.auto_threads,
