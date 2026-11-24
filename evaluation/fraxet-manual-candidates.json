@@ -1,0 +1,14 @@
+{
+  "candidates": [
+    {"tile_size": 64, "cut_after": 0, "threads": 2, "storage_mode": "memory"},
+    {"tile_size": 128, "cut_after": 0, "threads": 2, "storage_mode": "memory"},
+    {"tile_size": 256, "cut_after": 0, "threads": 2, "storage_mode": "memory"},
+    {"tile_size": 512, "cut_after": 0, "threads": 2, "storage_mode": "memory"},
+    {"tile_size": 64, "cut_after": 0, "threads": 2, "storage_mode": "disk"},
+    {"tile_size": 128, "cut_after": 0, "threads": 2, "storage_mode": "disk"},
+    {"tile_size": 256, "cut_after": 0, "threads": 2, "storage_mode": "disk"},
+    {"tile_size": 512, "cut_after": 0, "threads": 2, "storage_mode": "disk"},
+    {"tile_size": 128, "cut_after": 0, "threads": 1, "storage_mode": "memory"},
+    {"tile_size": 256, "cut_after": 0, "threads": 1, "storage_mode": "disk"}
+  ]
+}
