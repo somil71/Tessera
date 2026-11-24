@@ -2,6 +2,8 @@
 
 This workflow is for a 64-bit Windows machine with Python 3.11, a Rust toolchain, and enough free disk space for the input, FP32 output, and temporary files. It describes the current source checkout; a clean-machine installation has not yet been independently verified.
 
+To verify a new checkout and virtual environment on this Windows machine, run `powershell -ExecutionPolicy Bypass -File tests\install\verify_clean_windows.ps1` from the repository root. It clones the committed source into a unique directory under `runs/`, installs pinned Python dependencies, builds locked Rust dependencies, and exercises the doctor, Job Object, automatic raster path, and whole-image oracle. It writes `result.json` in the new directory. This tests dependency completeness on one machine; a separate Windows machine remains an independent installation check.
+
 From the repository root in PowerShell:
 
 ```powershell
