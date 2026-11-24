@@ -1,6 +1,6 @@
 # Development status
 
-Updated 2026-11-23. This is the state of the repository, not a claim that the v1 product or feasibility experiment has passed.
+Updated 2026-11-24. This is the state of the repository, not a claim that the v1 product or feasibility experiment has passed.
 
 ## Purpose and acceptance target
 
@@ -21,6 +21,7 @@ Raster Compiler aims to run an ONNX vision model on a GeoTIFF too large for norm
 | Pointwise operator expansion | Inference-mode BatchNormalization, Sigmoid, and Mul validation, plus Rust graph shape inference for those operators and arbitrary symbolic NCHW input dimension names | Removes a concrete compatibility barrier exposed by an external model and permits more real pixelwise ONNX graphs | A 37×53 generated graph with all three operators matched whole-image ONNX Runtime exactly through fixed and automatic GeoTIFF runners under 128 MiB; the FTW-Q probe now reaches its Concat node. See [external-model probe](real-model-compatibility.md) |
 | Local dependency analysis | A backward ONNX graph walk derives spatial halo and alignment for Conv, ConvTranspose, MaxPool, pointwise operations, and channel Concat; Rust now infers Concat boundary shapes | Replaces hard-coded U-Net geometry and forms a reusable foundation for broader local-model schedules | Derived U-Net halo 4/alignment 2 kept all U-Net raster tests passing; a separate branched Conv/Concat graph had halo 2/alignment 1 and exact tiled scores at two sizes. See [analysis results](local-graph-analysis.md) |
 | General local raster path | A fixed and automatic GeoTIFF runner use derived halo/alignment, validate full and cropped output shapes, and measure graph-cut/storage candidates under a job cap | Executes a second spatial model topology without hard-coded U-Net wiring | A branched Conv/Concat model matched its whole-image reference exactly; at 4096², automatic tile 256 and fixed tile 128 had zero differing FP32 values across 256 windows under a 128 MiB hard cap. See [general local results](generic-local-raster-results.md) |
+| Adaptive calibration | Stop RAM probing after two clearly slower tile sizes; retain a second-stage search of skipped RAM plans before disk when complete executions fail | Reduces planner overhead without losing a recovery route under the memory cap | On the same 4096² development raster, 24 versus 36 candidates were measured, with the same selected plan and byte-identical output; a forced-failure test recovered at smaller RAM tile 4. See [adaptive results](adaptive-calibration-results.md) |
 
 The source of each piece is [graph.rs](../src/graph.rs), [split.rs](../src/split.rs), [execute.rs](../src/execute.rs), [memory.rs](../src/memory.rs), and [run_raster_fixed.py](../scripts/run_raster_fixed.py). Test fixtures and benchmark scripts live in `tests/`.
 

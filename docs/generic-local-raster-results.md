@@ -17,6 +17,8 @@ Both runs configured a 134,217,728-byte hard job limit. The automatic search rec
 
 The fixed alternate and automatic outputs were compared across all 256 nonoverlapping 256×256 windows. They had the same CRS and transform, zero differing FP32 values, and zero maximum absolute/eligible-relative error. Their TIFF file hashes differ because file layout/compression can vary. This cross-partition check is not a whole-image ONNX Runtime oracle at 4096²; the 37×53 test supplies that oracle for this model.
 
+An [adaptive calibration follow-up](adaptive-calibration-results.md) reduced measured RAM candidate probes from 36 to 24 on the same development input, selected the same plan, and produced a byte-identical output. It also verifies recovery from deliberately failed full-raster attempts.
+
 The current local analyzer covers explicit-pad Conv, ConvTranspose, MaxPool, pointwise operators, and channel Concat. It rejects spatial global operations and unmodeled attributes. The public FTW-Q model is still unsupported at Resize, and the current implementation does not prove arbitrary ONNX graph support. The new local path still needs an independent supported real model, repeated held-out evaluation, and a tuned baseline.
 
 Reproduce the fixture and large development case:

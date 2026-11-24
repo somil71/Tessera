@@ -28,6 +28,8 @@ from run_raster_global_mean import (run as run_global_mean, transform,
 from run_raster_unet import Worker, run as run_unet, validate_model as validate_unet
 
 DISK_PROBE_MIN_EXPECTED_RUNTIME_SECONDS = 10.0
+RAM_SLOW_TILE_FACTOR = 1.5
+RAM_SLOW_TILE_STREAK = 2
 
 
 def arguments():
@@ -271,17 +273,41 @@ def run(args):
         if family == "global_mean":
             cuts = (0,)
         probed_disk_tiles = set()
+        probed_ram_tiles = set()
         attempted_plans = set()
-        rounds = 2 if local_plan is not None else 1
+        ram_search_stopped_after = None
+        rounds = 3 if local_plan is not None else 2
         for round_index in range(rounds):
             if round_index == 0:
+                slow_tile_streak = 0
                 for tile in tiles:
+                    probed_ram_tiles.add(tile)
+                    tile_trials = []
                     for cut in cuts:
                         directory = work / f"tile_{tile}_cut_{cut}"
-                        trials.append(profile_candidate(
+                        trial = profile_candidate(
                             probe_model, directory, family, tile, cut, channels,
                             scores, height, width, exe, env, args.threads, job,
-                            "memory", local_plan))
+                            "memory", local_plan)
+                        trials.append(trial)
+                        tile_trials.append(trial)
+                    feasible_ram = [trial for trial in trials
+                                    if trial["storage_mode"] == "memory" and
+                                    trial["status"] == "ok"]
+                    feasible_tile = [trial for trial in tile_trials
+                                     if trial["status"] == "ok"]
+                    if feasible_tile and feasible_ram:
+                        best = min(trial["predicted_execution_seconds"]
+                                   for trial in feasible_ram)
+                        tile_best = min(trial["predicted_execution_seconds"]
+                                        for trial in feasible_tile)
+                        slow_tile_streak = (slow_tile_streak + 1 if
+                                            tile_best > RAM_SLOW_TILE_FACTOR*best else 0)
+                    else:
+                        slow_tile_streak = 0
+                    if slow_tile_streak >= RAM_SLOW_TILE_STREAK:
+                        ram_search_stopped_after = tile
+                        break
                 if local_plan is not None:
                     ram_ok = [trial for trial in trials if trial["status"] == "ok"]
                     best_ram = (min(ram_ok, key=lambda trial:
@@ -298,9 +324,21 @@ def run(args):
                         disk_tiles = []
                 else:
                     disk_tiles = []
-            else:
+            elif round_index == 1:
                 # A probe may pass while the full GeoTIFF fails under the cap.
-                # In that case, search all remaining U-Net spill tiles.
+                # In that case, search untried smaller RAM tiles first.
+                for tile in tiles:
+                    if tile in probed_ram_tiles:
+                        continue
+                    probed_ram_tiles.add(tile)
+                    for cut in cuts:
+                        directory = work / f"tile_{tile}_cut_{cut}"
+                        trials.append(profile_candidate(
+                            probe_model, directory, family, tile, cut, channels,
+                            scores, height, width, exe, env, args.threads, job,
+                            "memory", local_plan))
+                disk_tiles = []
+            else:
                 disk_tiles = [tile for tile in tiles if tile not in probed_disk_tiles]
             for tile in disk_tiles:
                 probed_disk_tiles.add(tile)
@@ -351,7 +389,10 @@ def run(args):
         report_path = output.with_suffix(".report.json")
         report = json.loads(report_path.read_text(encoding="utf-8"))
         report.update(strategy=f"auto-{family}",
-                      selection_rule="Profile RAM plans; if the fastest predicted RAM run is at least 10 s, profile larger U-Net spill tiles. Rank measured plans by predicted runtime; within 10%, prefer fewer tiles. If all full runs fail, profile remaining spill tiles",
+                      selection_rule="Profile RAM plans from large to small; stop after two smaller tile sizes each predict over 1.5 times the best runtime. If the fastest predicted RAM run is at least 10 s, profile larger local-graph spill tiles. Rank measured plans by predicted runtime; within 10%, prefer fewer tiles. If all full runs fail, profile remaining RAM tiles, then remaining disk tiles",
+                      ram_search_stopped_after_tile=ram_search_stopped_after,
+                      unprobed_ram_tile_sizes=[tile for tile in tiles
+                                               if tile not in probed_ram_tiles],
                       planning_seconds=time.perf_counter()-started-report["elapsed_seconds"],
                       total_elapsed_seconds=time.perf_counter()-started,
                       selected_plan=selected,
