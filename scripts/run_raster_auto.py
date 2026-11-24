@@ -57,7 +57,7 @@ def arguments():
 
 def model_family(model_path, model):
     supported_ops = {"Conv", "ConvTranspose", "Relu", "Identity", "Sigmoid",
-                     "BatchNormalization", "Add", "Sub", "Mul", "Concat",
+                     "BatchNormalization", "Add", "Sub", "Mul", "Div", "Concat",
                      "MaxPool", "ReduceMean", "Shape", "Reshape", "Transpose",
                      "MatMul", "Softmax", "Constant", "Gather", "Unsqueeze",
                      "Slice", "Cast", "Resize"}

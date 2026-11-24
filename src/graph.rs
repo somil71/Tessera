@@ -422,7 +422,7 @@ fn infer_shape(
         "Relu" | "Identity" | "Sigmoid" | "Softmax" | "BatchNormalization" => {
             input(0).cloned()
         }
-        "Add" | "Sub" | "Mul" => broadcast(input(0)?, input(1)?),
+        "Add" | "Sub" | "Mul" | "Div" => broadcast(input(0)?, input(1)?),
         "Concat" => {
             let first = input(0)?.clone();
             let rank = first.len();
@@ -590,6 +590,16 @@ mod tests {
         let analysis = analyze(&graph(), None).unwrap();
         assert_eq!(analysis.cuts[1], ["deep", "skip"]);
         assert_eq!(analysis.consumers["skip"], [1, 2]);
+    }
+
+    #[test]
+    fn division_broadcasts_channel_constants() {
+        let shapes = BTreeMap::from([
+            ("image".into(), Some(vec![1, 3, 64, 64])),
+            ("constant".into(), Some(vec![1, 3, 1, 1])),
+        ]);
+        assert_eq!(infer_shape(&node("Div", &["image", "constant"], &["scaled"]),
+                               &shapes, &GraphProto::new()), Some(vec![1, 3, 64, 64]));
     }
 
     #[test]

@@ -13,7 +13,7 @@ from onnx import TensorProto, helper
 
 
 POINTWISE = {"Relu", "Identity", "Sigmoid", "BatchNormalization",
-             "Add", "Sub", "Mul"}
+             "Add", "Sub", "Mul", "Div"}
 SHAPE_ONLY = {"Constant", "Gather", "Unsqueeze", "Slice", "Cast"}
 
 
@@ -190,7 +190,7 @@ def analyze_local(model):
                     or attrs.get("training_mode", 0) != 0
                     or not set(attrs).issubset({"epsilon", "momentum", "training_mode"})):
                     raise ValueError("BatchNormalization must use constant inference parameters")
-            elif op in {"Add", "Sub", "Mul"}:
+            elif op in {"Add", "Sub", "Mul", "Div"}:
                 if len(node.input) != 2 or attrs:
                     raise ValueError(f"node {index} ({op}) has unmodeled arity or attributes")
                 for name in node.input:
