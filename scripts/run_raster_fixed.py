@@ -39,11 +39,11 @@ def configure_gdal_cache(memory_limit_mib):
     """Bound GDAL's raster block cache before the first raster read."""
     if memory_limit_mib is None:
         cache_mib = 64
-    elif memory_limit_mib < 512:
-        cache_mib = max(8, min(64, memory_limit_mib // 8))
     else:
-        # Leave at least 256 MiB for Python, ONNX Runtime, and tile buffers.
-        cache_mib = min(1536, memory_limit_mib - 256)
+        # GDAL's cache competes with the scheduler and ONNX worker within the
+        # same Windows Job Object. A large cap here can push combined commit
+        # over the budget even when an individual worker probe succeeded.
+        cache_mib = max(8, min(256, memory_limit_mib // 8))
     os.environ["GDAL_CACHEMAX"] = str(cache_mib)
     return cache_mib
 
