@@ -175,13 +175,16 @@ def worker_shape_count(height, width, tile, family, local_plan=None):
 def profile_candidate(model, directory, family, tile, cut, channels, scores,
                       height, width, exe, env, threads, job, storage_mode="memory",
                       local_plan=None):
+    cold_probe = (family == "local_graph" and
+                  len(local_plan.operators) > 32)
     shape = ((min(height, tile+2*local_plan.halo_y),
               min(width, tile+2*local_plan.halo_x))
              if family in {"local_unet", "local_graph"} else (tile, tile))
     candidate = dict(tile_size=tile, cut_after=cut, storage_mode=storage_mode,
                      probe_shape=list(shape),
-                     timed_probe_repetitions=(1 if shape[0]*shape[1] > LARGE_PROBE_PIXELS
+                     timed_probe_repetitions=(1 if cold_probe or shape[0]*shape[1] > LARGE_PROBE_PIXELS
                                               else 3),
+                     probe_includes_warmup=not cold_probe,
                      tile_count=math.ceil(height/tile)*math.ceil(width/tile),
                      worker_shape_count=worker_shape_count(
                          height, width, tile, family, local_plan))
@@ -192,11 +195,15 @@ def profile_candidate(model, directory, family, tile, cut, channels, scores,
                         channels, threads, job, storage_mode)
         startup_ms = (time.perf_counter()-startup)*1000
         tile_data = np.zeros((channels, *shape), dtype=np.float32)
-        _, warmup_metric = worker.infer(tile_data, scores)
-        peaks = [int(warmup_metric["peak_commit_bytes"])]
-        current = warmup_metric.get("current_commit_bytes")
-        current_commits = [int(current) if current is not None else None]
-        job_peaks = [job.peak_job_bytes()]
+        peaks = []
+        current_commits = []
+        job_peaks = []
+        if not cold_probe:
+            _, warmup_metric = worker.infer(tile_data, scores)
+            peaks.append(int(warmup_metric["peak_commit_bytes"]))
+            current = warmup_metric.get("current_commit_bytes")
+            current_commits.append(int(current) if current is not None else None)
+            job_peaks.append(job.peak_job_bytes())
         durations = []
         metric = None
         for _ in range(candidate["timed_probe_repetitions"]):
@@ -347,7 +354,55 @@ def run(args):
         restored_equivalent_tiles = []
         rounds = (3 + int(sampled_cuts) + int(bool(equivalent_tiles))
                   if local_plan is not None else 2)
-        for round_index in range(rounds):
+        # When the largest legal tile covers the whole image, a guarded full
+        # attempt is cheaper and more representative than a probe followed by
+        # the same inference. If it fails, retain the failure and calibrate.
+        if (family in {"pointwise", "local_unet", "local_graph"} and
+                height <= tiles[0] and width <= tiles[0] and
+                not args.explore_spill):
+            candidate = dict(tile_size=tiles[0], cut_after=0,
+                             storage_mode="memory", tile_count=1,
+                             worker_shape_count=1, status="direct",
+                             probe_shape=[height, width],
+                             timed_probe_repetitions=0,
+                             probe_includes_warmup=False)
+            trials.append(candidate)
+            attempted_plans.add(("memory", tiles[0], 0))
+            run_args = copy.copy(args)
+            run_args.tile_size = tiles[0]
+            run_args.cut_after = 0
+            run_args.worker_mode = "pipe"
+            run_args.storage_mode = "memory"
+            run_args.general_local = family == "local_graph"
+            candidate["overall_job_peak_before_execution_bytes"] = job.peak_job_bytes()
+            candidate["overall_job_active_process_count_before_execution"] = job.active_process_count()
+            execution_job = None
+            try:
+                execution_job = JobMemoryLimit(args.memory_limit_mib*1024*1024)
+                if family == "pointwise":
+                    run_pointwise(run_args, external_job=execution_job)
+                else:
+                    run_unet(run_args, external_job=execution_job)
+                candidate["execution_job_peak_committed_bytes"] = execution_job.peak_job_bytes()
+                candidate["overall_job_peak_after_execution_bytes"] = job.peak_job_bytes()
+                candidate["overall_job_active_process_count_after_execution"] = job.active_process_count()
+                selected = candidate
+            except Exception as exc:
+                candidate.update(status="failed", error=str(exc))
+                attempts.append(dict(tile_size=tiles[0], cut_after=0,
+                                     storage_mode="memory", error=str(exc),
+                                     execution_job_peak_committed_bytes=(
+                                         execution_job.peak_job_bytes()
+                                         if execution_job is not None else None)))
+                failure_path = output.with_suffix(".failure.json")
+                if failure_path.exists():
+                    failure = json.loads(failure_path.read_text(encoding="utf-8"))
+                    if failure.get("output_published"):
+                        raise RuntimeError("direct execution published output before failing") from exc
+            finally:
+                if execution_job is not None:
+                    execution_job.close()
+        for round_index in range(0 if selected is not None else rounds):
             if round_index == 0:
                 slow_tile_streak = 0
                 for tile in tiles:
@@ -517,7 +572,7 @@ def run(args):
         report_path = output.with_suffix(".report.json")
         report = json.loads(report_path.read_text(encoding="utf-8"))
         report.update(strategy=f"auto-{family}",
-                      selection_rule="Profile RAM plans from large to small; stop after two smaller tile sizes each predict over 1.5 times the best runtime. For local graphs over 32 nodes, defer smaller tiles with an identical halo-expanded probe shape, sample structural cuts, try disk after each failed RAM probe, and execute the first feasible large-graph candidate to limit calibration cost. If sampled plans fail, search all remaining cuts and then restore deferred tile sizes. Profile larger spill tiles for smaller graphs when the fastest predicted RAM run is at least 10 s. Probes over one million pixels use one timed repetition after warmup. Rank measured plans by predicted runtime; within 10%, prefer fewer tiles",
+                      selection_rule="For a one-tile pointwise or local image, attempt cut-0 RAM execution directly under the hard cap; on failure retain the attempt and calibrate. Otherwise profile RAM plans from large to small; stop after two smaller tile sizes each predict over 1.5 times the best runtime. For local graphs over 32 nodes, defer smaller tiles with an identical halo-expanded probe shape, sample structural cuts, try disk after each failed RAM probe, and execute the first feasible large-graph candidate to limit calibration cost. If sampled plans fail, search all remaining cuts and then restore deferred tile sizes. Profile larger spill tiles for smaller graphs when the fastest predicted RAM run is at least 10 s. Large local graphs use one cold timed inference per candidate so the probe measures the first-run cost and avoids repeated session commitment; other probes over one million pixels use one timed repetition after warmup. Rank measured plans by predicted runtime; within 10%, prefer fewer tiles",
                       ram_search_stopped_after_tile=ram_search_stopped_after,
                       cut_candidates=list(cuts),
                       equivalent_probe_tile_sizes_skipped=equivalent_tiles,

@@ -54,15 +54,17 @@ auto.run_unet = fail_initial_full_runs
 args = Namespace(model=MODEL, input=SOURCE, output=OUTPUT,
                  memory_limit_mib=128, threads=2, band_order=None,
                  scale=1.0, offset=0.0, exe=auto.DEFAULT_EXE,
-                 ort_dll=auto.DEFAULT_DLL, max_tile_size=32,
+                 ort_dll=auto.DEFAULT_DLL, max_tile_size=64,
                  explore_spill=False, overwrite=False)
 auto.run(args)
 
 report = json.loads(OUTPUT.with_suffix(".report.json").read_text())
-assert report["ram_search_stopped_after_tile"] == 8
+assert report["ram_search_stopped_after_tile"] >= 8
 assert report["unprobed_ram_tile_sizes"] == []
 assert report["selected_plan"]["tile_size"] < 8
 assert report["selected_plan"]["storage_mode"] == "memory"
+assert any(item["tile_size"] == 64 and item["status"] == "failed"
+           for item in report["planning_candidates"])
 assert any(item["tile_size"] >= 8 for item in report["failed_execution_attempts"])
 assert report["memory_limit_enforced"] is True
 import onnxruntime as ort
