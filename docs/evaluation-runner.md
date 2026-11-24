@@ -4,6 +4,22 @@
 
 This runner does **not** tune the manual schedule, establish that a model was independently held out, or compute a whole-image numerical oracle. Use the [manual tuning tool](manual-baseline-tuning.md) with a predeclared candidate list and a frozen reference raster. For five repeated pairs, the benchmark checks its structured manifest, four-hour allowance, selected schedule, matching hashes, and retained artifacts. It cannot certify the candidate search's independence or quality. Freeze a genuinely new held-out model and its input hashes before using this for the feasibility decision. A ratio band from a development smoke run is not a protocol pass or failure.
 
+## Small whole-image numerical oracle
+
+For a crop that fits in RAM, run the model **unsplit** in ONNX Runtime before evaluating a scheduled output. The oracle enforces a pixel-count guard, requires a georeferenced raster without masked or non-finite pixels, and writes the raw FP32 score raster with matching CRS, transform, and source tags. It records hashes and ONNX Runtime version. With `--candidate`, it checks every raw score against the protocol's absolute and eligible-relative tolerances and reports the location of the largest error. A failed comparison exits nonzero but retains the reference and report for diagnosis.
+
+```powershell
+.\.venv\Scripts\python.exe tests\performance\whole_image_oracle.py `
+  --model models\evaluation\unet_dev.onnx `
+  --input data\small_unet_crop.tif `
+  --reference-output runs\oracle\unet_reference.tif `
+  --candidate runs\small_unet_auto.tif `
+  --report runs\oracle\unet_report.json `
+  --threads 2 --max-pixels 1048576
+```
+
+Supply the same `--band-order`, `--scale`, and `--offset` used by the scheduled runner. For reference generation without an existing candidate, omit `--candidate`. The reference output and report must be new paths. The tool does not enforce a memory cap: the small-crop bound is explicit, while the scheduled large-image runs use the Windows Job Object cap.
+
 Example for a preselected U-Net schedule:
 
 ```powershell
