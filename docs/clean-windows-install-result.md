@@ -1,0 +1,7 @@
+# Clean-checkout Windows verification
+
+Recorded 2026-11-24. `tests/install/verify_clean_windows.ps1` cloned committed source `3732120175aa252ac82ae64ae84bb54e2f775a59` into a new directory under `runs/`, created a new Python 3.11 virtual environment, installed `requirements-dev.txt`, and built Rust with `cargo build --locked` on the development Windows machine. The generated run record is `runs/clean-install-2d3f4f7df7494758833b64c1f791ea7d/result.json` (ignored by Git); it reports `passed`, from 12:55:59 to 12:57:44 UTC.
+
+The new checkout's doctor reported `ready`, with the expected Python/package versions, executable and ONNX Runtime DLL present. All six Rust unit tests passed. The automatic raster fixture matched its whole-image references for pointwise and local U-Net exactly, global mean within 1.49×10⁻⁸ absolute error, and block attention within 4.77×10⁻⁷. Its optional reference check passed for a correct oracle and failed for a deliberately altered score. The Windows Job Object test accepted an 8 MiB allocation and rejected a 64 MiB allocation under a 48 MiB cap. The separate whole-image oracle fixture passed exact, perturbed, and input-size cases.
+
+This verifies installation from committed files and a fresh environment **on the same physical machine**. It does not establish a second-machine result, independent user adoption, or compatibility with an arbitrary user model. The script leaves the isolated checkout and generated artifacts for inspection; it does not delete existing directories.
