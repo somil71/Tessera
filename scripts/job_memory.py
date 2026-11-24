@@ -165,6 +165,10 @@ class JobMemoryLimit:
             check(self.kernel.SetInformationJobObject(
                 self.handle, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
                 ctypes.byref(limits), ctypes.sizeof(limits)), "SetInformationJobObject")
+            actual = self._limits()
+            if (actual.basic_limit_information.limit_flags & JOB_OBJECT_LIMIT_JOB_MEMORY == 0
+                    or actual.job_memory_limit != self.job_limit_bytes):
+                raise RuntimeError("Windows Job Object did not retain the requested memory limit")
             self._sample_working_set()
             self._sampler = threading.Thread(target=self._sample_loop, daemon=True)
             self._sampler.start()
@@ -173,12 +177,15 @@ class JobMemoryLimit:
             raise
 
     def peak_job_bytes(self):
+        return int(self._limits().peak_job_memory_used)
+
+    def _limits(self):
         limits = ExtendedLimitInformation()
         check(self.kernel.QueryInformationJobObject(
             self.handle, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
             ctypes.byref(limits), ctypes.sizeof(limits), None),
             "QueryInformationJobObject")
-        return int(limits.peak_job_memory_used)
+        return limits
 
     def contains_process(self, process):
         result = ctypes.c_int()
@@ -224,6 +231,9 @@ class JobMemoryLimit:
                 continue
             ids = (ctypes.c_size_t * capacity).from_buffer(buffer, 8)
             return [int(ids[index]) for index in range(header.returned)]
+
+    def active_process_count(self):
+        return len(self._process_ids())
 
     def _sample_working_set(self):
         total_working_set = 0

@@ -192,17 +192,28 @@ def profile_candidate(model, directory, family, tile, cut, channels, scores,
                         channels, threads, job, storage_mode)
         startup_ms = (time.perf_counter()-startup)*1000
         tile_data = np.zeros((channels, *shape), dtype=np.float32)
-        worker.infer(tile_data, scores)
+        _, warmup_metric = worker.infer(tile_data, scores)
+        peaks = [int(warmup_metric["peak_commit_bytes"])]
+        current = warmup_metric.get("current_commit_bytes")
+        current_commits = [int(current) if current is not None else None]
+        job_peaks = [job.peak_job_bytes()]
         durations = []
         metric = None
         for _ in range(candidate["timed_probe_repetitions"]):
             began = time.perf_counter()
             _, metric = worker.infer(tile_data, scores)
             durations.append((time.perf_counter()-began)*1000)
+            peaks.append(int(metric["peak_commit_bytes"]))
+            current = metric.get("current_commit_bytes")
+            current_commits.append(int(current) if current is not None else None)
+            job_peaks.append(job.peak_job_bytes())
         inference_ms = statistics.median(durations)
         upper = own_peak_commit_bytes() + int(metric["peak_commit_bytes"])
         candidate.update(status="ok", startup_ms=startup_ms,
                          median_probe_ms=inference_ms,
+                         probe_process_peak_sequence_bytes=peaks,
+                         probe_process_current_commit_sequence_bytes=current_commits,
+                         probe_job_peak_sequence_bytes=job_peaks,
                          child_peak_commit_bytes=int(metric["peak_commit_bytes"]),
                          probe_spill_write_bytes=int(metric.get("spill_write_bytes", 0)),
                          probe_spill_read_bytes=int(metric.get("spill_read_bytes", 0)),
@@ -461,6 +472,8 @@ def run(args):
                 run_args.cut_after = candidate["cut_after"]
                 run_args.worker_mode = "pipe"
                 run_args.storage_mode = candidate["storage_mode"]
+                candidate["job_peak_before_execution_bytes"] = job.peak_job_bytes()
+                candidate["job_active_process_count_before_execution"] = job.active_process_count()
                 try:
                     if family == "pointwise":
                         run_pointwise(run_args, external_job=job)
@@ -469,6 +482,8 @@ def run(args):
                         run_unet(run_args, external_job=job)
                     else:
                         run_global_mean(run_args, external_job=job)
+                    candidate["job_peak_after_execution_bytes"] = job.peak_job_bytes()
+                    candidate["job_active_process_count_after_execution"] = job.active_process_count()
                     selected = candidate
                     break
                 except Exception as exc:
