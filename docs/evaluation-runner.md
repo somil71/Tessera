@@ -20,6 +20,17 @@ For a crop that fits in RAM, run the model **unsplit** in ONNX Runtime before ev
 
 Supply the same `--band-order`, `--scale`, and `--offset` used by the scheduled runner. For reference generation without an existing candidate, omit `--candidate`. The reference output and report must be new paths. The tool does not enforce a memory cap: the small-crop bound is explicit, while the scheduled large-image runs use the Windows Job Object cap.
 
+## Large local crop spot check
+
+For a **large local** model output, `tests/performance/verify_large_local_crops.py` samples top-left, center, and bottom-right crops. It derives the local model's halo and alignment, runs each crop unsplit in ONNX Runtime, and checks only pixels farther than the halo from the crop boundary. The report hashes the model, source, and candidate and records error per crop. This is a bounded spot check; it cannot establish correctness of every large-raster pixel. Use it alongside small whole-image oracles and alternate-partition comparisons.
+
+```powershell
+.\.venv\Scripts\python.exe tests\performance\verify_large_local_crops.py `
+  --model models\local_model.onnx --input data\large.tif `
+  --candidate runs\large_scores.tif `
+  --report runs\large_crop_check.json --crop-size 128
+```
+
 Example for a preselected U-Net schedule:
 
 ```powershell
