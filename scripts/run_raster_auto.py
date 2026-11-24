@@ -27,6 +27,7 @@ from run_raster_fixed import (DEFAULT_DLL, DEFAULT_EXE, configure_gdal_cache, mo
 from run_raster_global_mean import (run as run_global_mean, transform,
                                     validate_reduction)
 from run_raster_unet import Worker, run as run_unet, validate_model as validate_unet
+from score_compare import compare_scores
 
 DISK_PROBE_MIN_EXPECTED_RUNTIME_SECONDS = 10.0
 RAM_SLOW_TILE_FACTOR = 1.5
@@ -40,6 +41,8 @@ def arguments():
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--reference-raster", type=Path,
+                        help="Optional whole-image FP32 score oracle for audited comparison")
     parser.add_argument("--memory-limit-mib", type=int, required=True)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--band-order", help="Comma-separated 1-based source band indexes")
@@ -262,8 +265,12 @@ def run(args):
     model_path = args.model.resolve(strict=True)
     source = args.input.resolve(strict=True)
     output = args.output.resolve()
+    reference = (getattr(args, "reference_raster", None) or None)
+    reference = reference.resolve(strict=True) if reference is not None else None
     if output in {model_path, source}:
         raise ValueError("output must differ from model and input")
+    if reference == output:
+        raise ValueError("reference raster must differ from output")
     if output.exists() and not args.overwrite:
         raise FileExistsError(f"output already exists: {output}")
     if args.memory_limit_mib < 1 or args.threads < 1 or args.max_tile_size < 2:
@@ -306,6 +313,8 @@ def run(args):
             run_attention(args, external_job=job)
             report_path = output.with_suffix(".report.json")
             report = json.loads(report_path.read_text(encoding="utf-8"))
+            if reference is not None:
+                report["numerical_error"] = compare_scores(reference, output)
             selected = dict(query_block=report["query_block"],
                             key_block=report["key_block"],
                             estimated_attention_seconds=report["estimated_attention_seconds"])
@@ -317,6 +326,8 @@ def run(args):
                           job_peak_conservative_upper_bound_bytes=job.conservative_peak_bytes())
             report.update(job.resource_snapshot())
             report_path.write_text(json.dumps(report, indent=2)+"\n", encoding="utf-8")
+            if reference is not None and not report["numerical_error"]["passed"]:
+                raise AssertionError("raster scores exceeded the numerical tolerances")
             output.with_suffix(".plan.failure.json").unlink(missing_ok=True)
             print(f"auto plan: block attention {selected['query_block']}x{selected['key_block']}")
             return
@@ -571,6 +582,8 @@ def run(args):
             raise RuntimeError("no tile/cut/storage candidate completed under the memory budget")
         report_path = output.with_suffix(".report.json")
         report = json.loads(report_path.read_text(encoding="utf-8"))
+        if reference is not None:
+            report["numerical_error"] = compare_scores(reference, output)
         report.update(strategy=f"auto-{family}",
                       selection_rule="For a one-tile pointwise or local image, attempt cut-0 RAM execution directly under the hard cap; on failure retain the attempt and calibrate. Otherwise profile RAM plans from large to small; stop after two smaller tile sizes each predict over 1.5 times the best runtime. For local graphs over 32 nodes, defer smaller tiles with an identical halo-expanded probe shape, sample structural cuts, try disk after each failed RAM probe, and execute the first feasible large-graph candidate to limit calibration cost. If sampled plans fail, search all remaining cuts and then restore deferred tile sizes. Profile larger spill tiles for smaller graphs when the fastest predicted RAM run is at least 10 s. Large local graphs use one cold timed inference per candidate so the probe measures the first-run cost and avoids repeated session commitment; other probes over one million pixels use one timed repetition after warmup. Rank measured plans by predicted runtime; within 10%, prefer fewer tiles",
                       ram_search_stopped_after_tile=ram_search_stopped_after,
@@ -590,6 +603,8 @@ def run(args):
         report.update({f"overall_{key}": value
                        for key, value in job.resource_snapshot().items()})
         report_path.write_text(json.dumps(report, indent=2)+"\n", encoding="utf-8")
+        if reference is not None and not report["numerical_error"]["passed"]:
+            raise AssertionError("raster scores exceeded the numerical tolerances")
         output.with_suffix(".plan.failure.json").unlink(missing_ok=True)
         print(f"auto plan: {family}, tile {selected['tile_size']}, cut {selected['cut_after']}, "
               f"storage {selected['storage_mode']}; "

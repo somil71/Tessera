@@ -48,6 +48,8 @@ for family, model in (
     reference_input = (IMAGE[[2, 1, 0]]*0.5-0.1
                        if family == "pointwise" else IMAGE)
     reference = session.run(None, {"image": reference_input[np.newaxis]})[0][0]
+    if family == "pointwise":
+        pointwise_reference = reference.copy()
     with rasterio.open(output) as raster:
         actual = raster.read()
         assert raster.crs == rasterio.crs.CRS.from_epsg(32643)
@@ -83,6 +85,47 @@ for family, model in (
 
 print("automatic raster plans passed all three references")
 
+reference_path = OUT / "pointwise_oracle.tif"
+with rasterio.open(OUT / "pointwise.tif") as existing:
+    reference_profile = existing.profile
+with rasterio.open(reference_path, "w", **reference_profile) as oracle:
+    oracle.write(pointwise_reference)
+checked_output = OUT / "pointwise_checked.tif"
+checked = subprocess.run(
+    [PYTHON, RUNNER, "--model", ROOT / "models" / "pointwise_dev.onnx",
+     "--input", SOURCE, "--output", checked_output,
+     "--reference-raster", reference_path, "--memory-limit-mib", "128",
+     "--max-tile-size", "32", "--overwrite", "--band-order", "3,2,1",
+     "--scale", "0.5", "--offset", "-0.1"],
+    capture_output=True, text=True,
+)
+assert checked.returncode == 0, checked.stderr
+checked_report = json.loads(checked_output.with_suffix(".report.json").read_text())
+assert checked_report["numerical_error"]["passed"] is True
+assert checked_report["numerical_error"]["max_absolute_error"] == 0
+assert checked_report["numerical_error"]["reference_sha256"]
+
+wrong_reference = OUT / "pointwise_wrong_oracle.tif"
+altered = pointwise_reference.copy()
+altered[0, 0, 0] += 0.01
+with rasterio.open(wrong_reference, "w", **reference_profile) as oracle:
+    oracle.write(altered)
+failed_output = OUT / "pointwise_reference_failure.tif"
+failed = subprocess.run(
+    [PYTHON, RUNNER, "--model", ROOT / "models" / "pointwise_dev.onnx",
+     "--input", SOURCE, "--output", failed_output,
+     "--reference-raster", wrong_reference, "--memory-limit-mib", "128",
+     "--max-tile-size", "32", "--overwrite", "--band-order", "3,2,1",
+     "--scale", "0.5", "--offset", "-0.1"],
+    capture_output=True, text=True,
+)
+assert failed.returncode != 0
+failed_report = json.loads(failed_output.with_suffix(".report.json").read_text())
+assert failed_report["numerical_error"]["passed"] is False
+assert failed_report["numerical_error"]["max_absolute_error"] >= 0.01 - 1e-6
+assert json.loads(failed_output.with_suffix(".plan.failure.json").read_text())["status"] == "failed"
+print("optional score oracle: exact match and numerical failure recorded")
+
 attention_model = ROOT / "models" / "evaluation" / "attention_holdout.onnx"
 attention_source = OUT / "attention_input.tif"
 attention_output = OUT / "block_attention.tif"
@@ -113,6 +156,20 @@ assert attention_report["job_peak_working_set_sampled_bytes"] > 0
 assert attention_report["job_peak_private_commit_sampled_bytes"] <= 128*1024*1024
 assert attention_report["working_set_sample_count"] > 0
 assert attention_report["job_peak_conservative_upper_bound_bytes"] <= 128*1024*1024
+attention_reference = OUT / "attention_oracle.tif"
+with rasterio.open(attention_output) as existing:
+    attention_profile = existing.profile
+with rasterio.open(attention_reference, "w", **attention_profile) as oracle:
+    oracle.write(reference)
+attention_checked = subprocess.run(
+    [PYTHON, RUNNER, "--model", attention_model, "--input", attention_source,
+     "--output", attention_output, "--reference-raster", attention_reference,
+     "--memory-limit-mib", "128", "--overwrite"],
+    capture_output=True, text=True,
+)
+assert attention_checked.returncode == 0, attention_checked.stderr
+assert json.loads(attention_output.with_suffix(".report.json").read_text())[
+    "numerical_error"]["passed"] is True
 print(f"block_attention: max_abs={error:.3g}")
 
 small_output = OUT / "too_small.tif"
