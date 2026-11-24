@@ -472,30 +472,42 @@ def run(args):
                 run_args.cut_after = candidate["cut_after"]
                 run_args.worker_mode = "pipe"
                 run_args.storage_mode = candidate["storage_mode"]
-                candidate["job_peak_before_execution_bytes"] = job.peak_job_bytes()
-                candidate["job_active_process_count_before_execution"] = job.active_process_count()
+                candidate["overall_job_peak_before_execution_bytes"] = job.peak_job_bytes()
+                candidate["overall_job_active_process_count_before_execution"] = job.active_process_count()
+                execution_job = None
                 try:
+                    # The scheduler remains in the outer capped job. A nested
+                    # job gives this complete-raster attempt an independent
+                    # peak counter without letting it escape the outer cap.
+                    execution_job = JobMemoryLimit(args.memory_limit_mib*1024*1024)
                     if family == "pointwise":
-                        run_pointwise(run_args, external_job=job)
+                        run_pointwise(run_args, external_job=execution_job)
                     elif family in {"local_unet", "local_graph"}:
                         run_args.general_local = family == "local_graph"
-                        run_unet(run_args, external_job=job)
+                        run_unet(run_args, external_job=execution_job)
                     else:
-                        run_global_mean(run_args, external_job=job)
-                    candidate["job_peak_after_execution_bytes"] = job.peak_job_bytes()
-                    candidate["job_active_process_count_after_execution"] = job.active_process_count()
+                        run_global_mean(run_args, external_job=execution_job)
+                    candidate["execution_job_peak_committed_bytes"] = execution_job.peak_job_bytes()
+                    candidate["overall_job_peak_after_execution_bytes"] = job.peak_job_bytes()
+                    candidate["overall_job_active_process_count_after_execution"] = job.active_process_count()
                     selected = candidate
                     break
                 except Exception as exc:
                     attempts.append(dict(tile_size=candidate["tile_size"],
                                          cut_after=candidate["cut_after"],
                                          storage_mode=candidate["storage_mode"],
-                                         error=str(exc)))
+                                         error=str(exc),
+                                         execution_job_peak_committed_bytes=(
+                                             execution_job.peak_job_bytes()
+                                             if execution_job is not None else None)))
                     failure_path = output.with_suffix(".failure.json")
                     if failure_path.exists():
                         failure = json.loads(failure_path.read_text(encoding="utf-8"))
                         if failure.get("output_published"):
                             raise RuntimeError("execution published output before failing; see failure report") from exc
+                finally:
+                    if execution_job is not None:
+                        execution_job.close()
             if selected is not None:
                 break
         if selected is None:
@@ -517,9 +529,11 @@ def run(args):
                       selected_plan=selected,
                       planning_candidates=trials,
                       failed_execution_attempts=attempts,
-                      job_peak_committed_bytes=job.peak_job_bytes(),
-                      job_peak_conservative_upper_bound_bytes=job.conservative_peak_bytes())
-        report.update(job.resource_snapshot())
+                      overall_job_peak_committed_bytes=job.peak_job_bytes(),
+                      overall_job_peak_conservative_upper_bound_bytes=job.conservative_peak_bytes(),
+                      planning_memory_limit_enforced=True)
+        report.update({f"overall_{key}": value
+                       for key, value in job.resource_snapshot().items()})
         report_path.write_text(json.dumps(report, indent=2)+"\n", encoding="utf-8")
         output.with_suffix(".plan.failure.json").unlink(missing_ok=True)
         print(f"auto plan: {family}, tile {selected['tile_size']}, cut {selected['cut_after']}, "

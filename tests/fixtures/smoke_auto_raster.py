@@ -62,6 +62,13 @@ for family, model in (
     report = json.loads(output.with_suffix(".report.json").read_text())
     assert report["strategy"] == f"auto-{family}"
     assert report["memory_limit_enforced"] is True
+    assert report["planning_memory_limit_enforced"] is True
+    assert report["overall_job_enforced_limit_bytes"] <= 128*1024*1024
+    assert report["overall_job_peak_private_commit_sampled_bytes"] <= 128*1024*1024
+    assert report["job_peak_committed_bytes"] <= 128*1024*1024
+    assert report["selected_plan"]["execution_job_peak_committed_bytes"] <= 128*1024*1024
+    assert report["selected_plan"]["overall_job_active_process_count_before_execution"] == 1
+    assert report["selected_plan"]["overall_job_active_process_count_after_execution"] == 1
     assert report["gdal_cachemax_mib"] == 16
     assert report["job_peak_working_set_sampled_bytes"] > 0
     assert report["job_peak_private_commit_sampled_bytes"] <= 128*1024*1024

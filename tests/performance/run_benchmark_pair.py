@@ -222,6 +222,15 @@ def run(args):
                            job_io_write_transfer_bytes=report.get("job_io_write_transfer_bytes"),
                            conservative_peak_bytes=report.get(
                                "job_peak_conservative_upper_bound_bytes"))
+                if method == "auto":
+                    run.update(overall_peak_job_commit_bytes=report.get(
+                                   "overall_job_peak_committed_bytes"),
+                               overall_peak_private_commit_sampled_bytes=report.get(
+                                   "overall_job_peak_private_commit_sampled_bytes"),
+                               overall_peak_counter_exceeds_budget=report.get(
+                                   "overall_job_peak_counter_exceeds_budget"),
+                               overall_enforced_job_limit_bytes=report.get(
+                                   "overall_job_enforced_limit_bytes"))
                 if (report.get("memory_limit_enforced") is not True or
                         report.get("memory_limit_bytes") != cap or
                         run["conservative_peak_bytes"] is None or
@@ -230,17 +239,29 @@ def run(args):
                         run["peak_private_commit_sampled_bytes"] is None or
                         run["peak_private_commit_sampled_bytes"] > cap):
                     run["validation_error"] = "job-wide memory evidence failed"
+                elif (method == "auto" and
+                      (report.get("planning_memory_limit_enforced") is not True or
+                       not isinstance(run["overall_enforced_job_limit_bytes"], int) or
+                       run["overall_enforced_job_limit_bytes"] > cap or
+                       not isinstance(run["overall_peak_private_commit_sampled_bytes"], int) or
+                       run["overall_peak_private_commit_sampled_bytes"] > cap)):
+                    run["validation_error"] = "planning job memory evidence failed"
                 elif (not isinstance(run["peak_job_working_set_sampled_bytes"], int) or
                       run["peak_job_working_set_sampled_bytes"] <= 0 or
                       not isinstance(run["job_io_read_transfer_bytes"], int) or
                       not isinstance(run["job_io_write_transfer_bytes"], int)):
                     run["validation_error"] = "job resource accounting is missing"
-                elif (run["peak_counter_exceeds_budget"] is True and
+                elif run["peak_counter_exceeds_budget"] is True:
+                    run["validation_error"] = (
+                        "selected execution job peak exceeded the cap"
+                    )
+                elif (method == "auto" and
+                      run["overall_peak_counter_exceeds_budget"] is True and
                       not any(item.get("status") == "failed" for item in
                               report.get("planning_candidates", [])) and
                       not report.get("failed_execution_attempts")):
                     run["validation_error"] = (
-                        "raw job peak counter exceeded the cap without a recorded failed attempt"
+                        "outer planning job peak exceeded the cap without a recorded failed attempt"
                     )
             else:
                 run["validation_error"] = "runner failed or omitted output/report"
