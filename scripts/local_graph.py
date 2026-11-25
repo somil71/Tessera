@@ -17,8 +17,9 @@ from onnx.reference import ReferenceEvaluator
 POINTWISE = {"Relu", "Identity", "Sigmoid", "BatchNormalization",
              "Add", "Sub", "Mul", "Div"}
 SHAPE_ONLY = {"Constant", "Gather", "Unsqueeze", "Slice", "Cast",
-              "ConstantOfShape", "Reshape", "Transpose"}
+              "ConstantOfShape", "Reshape", "Transpose", "Squeeze"}
 PURE_CONSTANT = SHAPE_ONLY | {"Concat"}
+SHAPE_ARITHMETIC = {"Add", "Sub", "Mul", "Div"}
 
 
 @dataclass(frozen=True)
@@ -147,7 +148,20 @@ def _spatial_op(node, initializers):
 def _concrete_shapes(model, height, width):
     """Infer tensor shapes with a concrete batch-one image, without executing it."""
     concrete = onnx.ModelProto()
-    concrete.CopyFrom(model)
+    concrete.ir_version = model.ir_version
+    concrete.opset_import.extend(model.opset_import)
+    concrete.graph.node.extend(model.graph.node)
+    concrete.graph.input.extend(model.graph.input)
+    concrete.graph.output.extend(model.graph.output)
+    concrete.graph.value_info.extend(model.graph.value_info)
+    for tensor in model.graph.initializer:
+        if len(tensor.raw_data) > 1_048_576:
+            # Shape inference needs large convolution weight dimensions, not
+            # their contents. Keep small shape constants for data propagation.
+            concrete.graph.initializer.add(name=tensor.name, data_type=tensor.data_type,
+                                            dims=tensor.dims)
+        else:
+            concrete.graph.initializer.add().CopyFrom(tensor)
     initializers = {item.name for item in concrete.graph.initializer}
     inputs = [item for item in concrete.graph.input if item.name not in initializers]
     if len(inputs) != 1:
@@ -169,21 +183,87 @@ def _concrete_shapes(model, height, width):
     return shapes
 
 
-def _resize_factors(node, shape_sets):
+def _evaluated_resize_sizes(model, shapes, name):
+    """Execute only shape plumbing, replacing Shape(image) with known dimensions."""
+    producers = {output: node for node in model.graph.node for output in node.output}
+    initializers = {tensor.name: tensor for tensor in model.graph.initializer}
+    nodes, constants, visited = [], {}, set()
+
+    def visit(tensor_name):
+        if tensor_name in visited:
+            return
+        visited.add(tensor_name)
+        if tensor_name in initializers:
+            constants[tensor_name] = initializers[tensor_name]
+            return
+        node = producers.get(tensor_name)
+        if node is None:
+            raise ValueError(f"Resize sizes depend on unknown tensor {tensor_name}")
+        if node.op_type == "Shape":
+            source = shapes.get(node.input[0])
+            if source is None:
+                raise ValueError(f"Resize sizes depend on uninferred shape {node.input[0]}")
+            attrs = _attrs(node)
+            start, end = attrs.get("start", 0), attrs.get("end", len(source))
+            value = np.asarray(source[start:end], dtype=np.int64)
+            nodes.append(onnx.helper.make_node("Constant", [], list(node.output),
+                         value=onnx.numpy_helper.from_array(value)))
+            return
+        if node.op_type not in SHAPE_ONLY | SHAPE_ARITHMETIC | {"Concat"}:
+            raise ValueError(f"Resize sizes depend on unmodeled {node.op_type}")
+        for dependency in node.input:
+            if dependency:
+                visit(dependency)
+        nodes.append(node)
+
+    visit(name)
+    output = onnx.helper.make_tensor_value_info(name, TensorProto.INT64, None)
+    graph = onnx.helper.make_graph(nodes, "resize-sizes", [], [output],
+                                   initializer=list(constants.values()))
+    probe = onnx.helper.make_model(graph, opset_imports=list(model.opset_import))
+    probe.ir_version = model.ir_version
+    try:
+        result = ReferenceEvaluator(probe).run(None, {})[0]
+    except Exception as error:
+        raise ValueError(f"Resize sizes could not be evaluated: {error}") from error
+    if result.dtype != np.int64 or result.shape != (4,):
+        raise ValueError("Resize sizes must be a four-element int64 vector")
+    return tuple(int(value) for value in result)
+
+
+def _resize_factors(node, shape_sets, model):
     attrs = _attrs(node)
     if (attrs.get("mode", b"nearest") != b"nearest"
             or attrs.get("coordinate_transformation_mode", b"half_pixel") != b"asymmetric"
             or attrs.get("nearest_mode", b"round_prefer_floor") != b"floor"
+            or attrs.get("exclude_outside", 0) != 0
+            or attrs.get("antialias", 0) != 0
+            or attrs.get("extrapolation_value", 0.0) != 0.0
+            or attrs.get("keep_aspect_ratio_policy", b"stretch") != b"stretch"
             or set(attrs) - {"mode", "coordinate_transformation_mode", "nearest_mode",
-                             "cubic_coeff_a"}):
+                             "cubic_coeff_a", "exclude_outside", "antialias",
+                             "extrapolation_value", "keep_aspect_ratio_policy"}):
         raise ValueError("Resize requires nearest/asymmetric/floor semantics")
     if len(node.input) != 4 or node.input[1:3] != ["", ""] or not node.input[3]:
         raise ValueError("Resize requires a dynamic sizes input only")
     factors = None
     for shapes in shape_sets:
         source, target = shapes.get(node.input[0]), shapes.get(node.output[0])
+        if source is not None and target is None:
+            consumers = [candidate for candidate in model.graph.node
+                         if node.output[0] in candidate.input]
+            if (len(consumers) == 1 and consumers[0].op_type == "Concat"
+                    and _attrs(consumers[0]) == {"axis": 1}
+                    and len(consumers[0].input) == 2):
+                sibling = next(name for name in consumers[0].input
+                               if name != node.output[0])
+                other = shapes.get(sibling)
+                if other is not None and other[0] == source[0]:
+                    target = (source[0], source[1], other[2], other[3])
         if source is None or target is None or source[:2] != target[:2]:
             raise ValueError("Resize spatial input/output shapes were not inferred")
+        if _evaluated_resize_sizes(model, shapes, node.input[3]) != target:
+            raise ValueError("Resize sizes disagree with inferred output shape")
         if any(target[axis] % source[axis] for axis in (2, 3)):
             raise ValueError("Resize needs an integer spatial upsample factor")
         sample = tuple(target[axis] // source[axis] for axis in (2, 3))
@@ -222,10 +302,14 @@ def analyze_local(model):
         op = node.op_type
         data_inputs = [name for name in node.input if name in steps]
         if op == "Shape":
-            if len(node.input) != 1 or _attrs(node):
+            attrs = _attrs(node)
+            start, end = attrs.get("start", 0), attrs.get("end", 4)
+            if (len(node.input) != 1 or set(attrs) - {"start", "end"}
+                    or not 0 <= start < end <= 4):
                 raise ValueError(f"node {index} Shape has unmodeled inputs or attributes")
             continue
-        if op in SHAPE_ONLY or (op == "Concat" and _attrs(node).get("axis") == 0):
+        if (op in SHAPE_ONLY or (op == "Concat" and _attrs(node).get("axis") == 0)
+                or (op in SHAPE_ARITHMETIC and not data_inputs)):
             if data_inputs:
                 raise ValueError(f"node {index} ({op}) applies shape-only logic to image values")
             continue
@@ -278,7 +362,7 @@ def analyze_local(model):
         elif op == "Resize":
             if list(node.input[:1]) != [data_inputs[0]] or len(data_inputs) != 1:
                 raise ValueError(f"node {index} Resize needs one spatial input")
-            resize_factor = _resize_factors(node, resize_shape_sets)
+            resize_factor = _resize_factors(node, resize_shape_sets, model)
             if any(step[axis] % resize_factor[axis] for axis in range(2)):
                 raise ValueError(f"node {index} Resize has fractional image phase")
             next_step = tuple(step[axis] // resize_factor[axis] for axis in range(2))
@@ -370,7 +454,7 @@ def local_output_shape(model, height, width):
         for index, node in enumerate(model.graph.node):
             if node.op_type == "Resize":
                 try:
-                    _resize_factors(node, [shapes])
+                    _resize_factors(node, [shapes], model)
                 except ValueError as error:
                     raise ValueError(f"node {index} Resize shape invalid: {error}") from error
         output = shapes.get(model.graph.output[0].name)
@@ -384,7 +468,9 @@ def local_output_shape(model, height, width):
         if node.op_type == "Shape":
             continue
         if (node.op_type in SHAPE_ONLY
-                or (node.op_type == "Concat" and _attrs(node).get("axis") == 0)):
+                or (node.op_type == "Concat" and _attrs(node).get("axis") == 0)
+                or (node.op_type in SHAPE_ARITHMETIC
+                    and not any(name in shapes for name in node.input))):
             if any(name in shapes for name in node.input):
                 raise ValueError(f"node {index} applies shape-only logic to image values")
             continue

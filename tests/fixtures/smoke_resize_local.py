@@ -15,7 +15,7 @@ from rasterio.transform import from_origin
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
-from local_graph import analyze_local, local_output_shape, validate_local_raster
+from local_graph import _resize_factors, analyze_local, local_output_shape, validate_local_raster
 
 OUTPUT = ROOT / "runs" / "resize_local_smoke"
 OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -80,6 +80,32 @@ except ValueError as error:
     assert "integer spatial upsample" in str(error)
 else:
     raise AssertionError("odd resize ratio should have been rejected")
+
+# A downstream channel Concat can suggest the expected height and width even
+# when the Resize sizes tensor actually requests different dimensions.
+wrong_sizes = onnx.ModelProto()
+wrong_sizes.CopyFrom(model)
+size_concat = next(node for node in wrong_sizes.graph.node if "sizes" in node.output)
+size_concat.input[1] = "bad_spatial"
+size_index = next(index for index, node in enumerate(wrong_sizes.graph.node)
+                  if "sizes" in node.output)
+wrong_sizes.graph.node.insert(size_index, constant("size_delta", [0, 2]))
+wrong_sizes.graph.node.insert(size_index + 1,
+                              helper.make_node("Add", ["spatial_int", "size_delta"],
+                                               ["bad_spatial"]))
+wrong_sizes.graph.node[-1].output[0] = "resized"
+wrong_sizes.graph.node.append(helper.make_node("Concat", ["resized", "image"],
+                                               ["logits"], axis=1))
+wrong_sizes.graph.output[0].type.tensor_type.shape.dim[1].dim_value = 2
+onnx.checker.check_model(wrong_sizes)
+try:
+    resize = next(node for node in wrong_sizes.graph.node if node.op_type == "Resize")
+    _resize_factors(resize, [{"down": (1, 1, 64, 64),
+                              "image": (1, 1, 128, 128)}], wrong_sizes)
+except ValueError as error:
+    assert "Resize sizes disagree" in str(error)
+else:
+    raise AssertionError("mismatched dynamic Resize sizes should be rejected")
 
 session = ort.InferenceSession(str(MODEL), providers=["CPUExecutionProvider"])
 image = np.random.default_rng(9801).standard_normal((1, 1, 66, 98), dtype=np.float32)

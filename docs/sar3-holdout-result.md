@@ -5,3 +5,11 @@ Recorded 2026-11-25. [Amendment 6](evaluation-amendment-6.md), the logits-only p
 The projected model declares one FP32 NCHW three-band input and one FP32 NCHW two-logit output, both with dynamic spatial dimensions. The 512×512 three-band GeoTIFF has EPSG:32643, no nodata, and the frozen SHA-256 hash. The model has 194 selected logits-ancestor nodes. The installation doctor reported **failed** before inference: first unsupported node **1**, `Squeeze`, has no validated raster schedule.
 
 No automatic schedule, numerical oracle, manual tuning, or five-pair benchmark was run. This is a **failed independent compatibility result** and cannot establish the feasibility pass. The graph is now exposed development material. Subsequent inspection showed the `Squeeze` operations are part of shape calculations; supporting that pattern later will require another newly frozen model for an unseen decision test.
+
+## Exposed-model development follow-up
+
+After the failed preflight, the local analyzer gained shape-only `Squeeze`, scalar shape arithmetic, sliced `Shape`, and the model's nearest-neighbor `Resize` defaults. The Rust splitter now infers sliced `Shape` and `Squeeze` boundary shapes. Resize sizes are evaluated in an isolated shape-only subgraph and checked against the inferred spatial result. Shape inference uses initializer dimensions without copying large convolution weights into the concrete probe, avoiding a 1 GiB preflight allocation failure.
+
+On `sar3-512.tif`, fixed schedules with 512-pixel and 256-pixel tiles both matched whole-image FP32 logits exactly (`max_absolute_error=0`, 2×512×512 values) and preserved EPSG:32643 and the affine transform. The 256-pixel run used four tiles; its enforced job peak committed memory was 847,392,768 bytes. Automatic execution selected tile 512, cut 0, memory storage and also matched exactly, with 729,960,448 peak committed bytes under the 1,073,741,824-byte job cap. Local run reports and comparison records are under ignored `runs/holdout/sar3/`.
+
+These runs test implementation behavior on an already exposed model. They do not replace the failed independent result, the frozen paired performance benchmark, or a new unseen model and machine configuration.

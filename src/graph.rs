@@ -497,8 +497,34 @@ fn infer_shape(
             }
             Some(shape)
         }
-        "Shape" if attr(node, "start").is_none() && attr(node, "end").is_none() => {
-            Some(vec![input(0)?.len()])
+        "Shape" => {
+            let rank = i64::try_from(input(0)?.len()).ok()?;
+            let resolve = |value: i64| if value < 0 { rank.checked_add(value) } else { Some(value) };
+            let start = resolve(attr(node, "start").map_or(0, |value| value.i))?;
+            let end = resolve(attr(node, "end").map_or(rank, |value| value.i))?;
+            if start < 0 || end < start || end > rank {
+                return None;
+            }
+            Some(vec![usize::try_from(end - start).ok()?])
+        }
+        "Squeeze" => {
+            let source = input(0)?;
+            if let Some(axes_name) = node.input.get(1) {
+                let axes = int64_values(graph.initializer.iter().find(|item| item.name == *axes_name)?)?;
+                let rank = i64::try_from(source.len()).ok()?;
+                let mut selected = BTreeSet::new();
+                for axis in axes {
+                    let axis = if axis < 0 { rank.checked_add(axis)? } else { axis };
+                    let axis = usize::try_from(axis).ok()?;
+                    if *source.get(axis)? != 1 || !selected.insert(axis) {
+                        return None;
+                    }
+                }
+                Some(source.iter().enumerate().filter_map(|(axis, dim)|
+                    (!selected.contains(&axis)).then_some(*dim)).collect())
+            } else {
+                Some(source.iter().copied().filter(|dim| *dim != 1).collect())
+            }
         }
         "Transpose" => {
             let permutation = &attr(node, "perm")?.ints;
@@ -636,6 +662,22 @@ mod tests {
         ]);
         assert_eq!(infer_shape(&node("Div", &["image", "constant"], &["scaled"]),
                                &shapes, &GraphProto::new()), Some(vec![1, 3, 64, 64]));
+    }
+
+    #[test]
+    fn sliced_shape_and_squeeze_have_boundary_shapes() {
+        let shapes = BTreeMap::from([("image".into(), Some(vec![1, 3, 512, 512]))]);
+        let mut shape = node("Shape", &["image"], &["height_vector"]);
+        for (name, value) in [("start", 2), ("end", 3)] {
+            let mut attribute = onnx_protobuf::AttributeProto::new();
+            attribute.name = name.into();
+            attribute.i = value;
+            shape.attribute.push(attribute);
+        }
+        assert_eq!(infer_shape(&shape, &shapes, &GraphProto::new()), Some(vec![1]));
+        let shapes = BTreeMap::from([("height_vector".into(), Some(vec![1]))]);
+        assert_eq!(infer_shape(&node("Squeeze", &["height_vector"], &["height"]),
+                               &shapes, &GraphProto::new()), Some(vec![]));
     }
 
     #[test]
