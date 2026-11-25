@@ -65,15 +65,35 @@ pub fn analyze(graph: &GraphProto, image_size: Option<(usize, usize)>) -> Result
         }
 
         let inferred = infer_shape(node, &shapes, graph);
-        let element_size = if node.op_type == "Shape" {
+        let element_size = if node.op_type == "Constant" {
+            attr(node, "value")
+                .and_then(|val| val.t.as_ref())
+                .and_then(|tensor| onnx_element_size(Some(tensor.data_type)))
+        } else if node.op_type == "Shape" {
             Some(8)
+        } else if node.op_type == "ConstantOfShape" {
+            let data_type = attr(node, "value")
+                .and_then(|val| val.t.as_ref())
+                .map(|t| t.data_type)
+                .unwrap_or(1);
+            onnx_element_size(Some(data_type))
         } else {
             node.input
                 .first()
                 .and_then(|name| element_sizes.get(name).copied().flatten())
         };
-        let element_type = if node.op_type == "Shape" {
+        let element_type = if node.op_type == "Constant" {
+            attr(node, "value")
+                .and_then(|val| val.t.as_ref())
+                .map(|tensor| tensor.data_type)
+        } else if node.op_type == "Shape" {
             Some(7)
+        } else if node.op_type == "ConstantOfShape" {
+            let data_type = attr(node, "value")
+                .and_then(|val| val.t.as_ref())
+                .map(|t| t.data_type)
+                .unwrap_or(1);
+            Some(data_type)
         } else {
             node.input
                 .first()
@@ -392,6 +412,7 @@ fn infer_shape(
 ) -> Option<Shape> {
     let input = |index: usize| shapes.get(node.input.get(index)?).and_then(Option::as_ref);
     match node.op_type.as_str() {
+        "Constant" => positive_dims(&attr(node, "value")?.t.as_ref()?.dims),
         "Conv" | "ConvTranspose" => {
             let image = input(0)?;
             let weight = input(1)?;
@@ -419,6 +440,21 @@ fn infer_shape(
             )
         }
         "MaxPool" => spatial_shape(node, input(0)?, *input(0)?.get(1)?, false),
+        "Pad" => {
+            let image = input(0)?;
+            if image.len() != 4 || attr(node, "mode").is_some_and(|value| value.s != b"constant") {
+                return None;
+            }
+            let pads_name = node.input.get(1)?;
+            let pads = int64_values(graph.initializer.iter().find(|item| item.name == *pads_name)?)?;
+            if pads.len() != 8 || pads.iter().any(|value| *value < 0)
+                || pads[0] != 0 || pads[1] != 0 || pads[4] != 0 || pads[5] != 0 {
+                return None;
+            }
+            Some(vec![image[0], image[1],
+                      image[2].checked_add(usize::try_from(pads[2].checked_add(pads[6])?).ok()?)?,
+                      image[3].checked_add(usize::try_from(pads[3].checked_add(pads[7])?).ok()?)?])
+        }
         "Relu" | "Identity" | "Sigmoid" | "Softmax" | "BatchNormalization" => {
             input(0).cloned()
         }
@@ -647,5 +683,56 @@ mod tests {
         tensor.dims = vec![2];
         tensor.raw_data = vec![0; 8];
         assert_eq!(int64_values(&tensor), None);
+    }
+
+    #[test]
+    fn constant_of_shape_infers_element_type() {
+        let mut g = GraphProto::new();
+        let mut shape_input = ValueInfoProto::new();
+        shape_input.name = "shape_tensor".into();
+        let mut ty = onnx_protobuf::TypeProto::new();
+        ty.mut_tensor_type().elem_type = 7;
+        shape_input.type_ = protobuf::MessageField::some(ty);
+        g.input.push(shape_input);
+
+        let mut cos_node = node("ConstantOfShape", &["shape_tensor"], &["const_out"]);
+        let mut attr_val = onnx_protobuf::AttributeProto::new();
+        attr_val.name = "value".into();
+        let mut val_tensor = onnx_protobuf::TensorProto::new();
+        val_tensor.data_type = 1; // float32
+        val_tensor.dims = vec![1];
+        attr_val.t = protobuf::MessageField::some(val_tensor);
+        cos_node.attribute.push(attr_val);
+        g.node.push(cos_node);
+
+        let analysis = analyze(&g, None).unwrap();
+        assert_eq!(analysis.element_types["const_out"], Some(1));
+        assert_eq!(analysis.element_sizes["const_out"], Some(4));
+    }
+
+    #[test]
+    fn constant_and_static_spatial_pad_shapes_are_inferred() {
+        let mut constant = node("Constant", &[], &["shape_two"]);
+        let mut attribute = onnx_protobuf::AttributeProto::new();
+        attribute.name = "value".into();
+        let mut tensor = onnx_protobuf::TensorProto::new();
+        tensor.data_type = 7;
+        tensor.dims = vec![1];
+        tensor.int64_data = vec![2];
+        attribute.t = protobuf::MessageField::some(tensor);
+        constant.attribute.push(attribute);
+        assert_eq!(infer_shape(&constant, &BTreeMap::new(), &GraphProto::new()),
+                   Some(vec![1]));
+
+        let mut pads = onnx_protobuf::TensorProto::new();
+        pads.name = "pads".into();
+        pads.data_type = 7;
+        pads.dims = vec![8];
+        pads.int64_data = vec![0, 0, 1, 2, 0, 0, 1, 2];
+        let mut graph = GraphProto::new();
+        graph.initializer.push(pads);
+        let shapes = BTreeMap::from([("image".into(), Some(vec![1, 3, 10, 12]))]);
+        assert_eq!(infer_shape(&node("Pad", &["image", "pads"], &["padded"]),
+                               &shapes, &graph), Some(vec![1, 3, 12, 16]));
     }
 }

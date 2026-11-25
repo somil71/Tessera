@@ -9,12 +9,16 @@ from dataclasses import dataclass
 import math
 
 import onnx
+import numpy as np
 from onnx import TensorProto, helper
+from onnx.reference import ReferenceEvaluator
 
 
 POINTWISE = {"Relu", "Identity", "Sigmoid", "BatchNormalization",
              "Add", "Sub", "Mul", "Div"}
-SHAPE_ONLY = {"Constant", "Gather", "Unsqueeze", "Slice", "Cast"}
+SHAPE_ONLY = {"Constant", "Gather", "Unsqueeze", "Slice", "Cast",
+              "ConstantOfShape", "Reshape", "Transpose"}
+PURE_CONSTANT = SHAPE_ONLY | {"Concat"}
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,69 @@ def _pair(value, label):
     if len(result) != 2 or any(item < 1 for item in result):
         raise ValueError(f"{label} must contain two positive dimensions")
     return result
+
+
+def _constant_value(model, name, element_type):
+    """Evaluate a small initializer/constant-only branch, never image values."""
+    graph = model.graph
+    initializers = {item.name: item for item in graph.initializer}
+    producers = {output: node for node in graph.node for output in node.output}
+    selected = set()
+
+    def visit(value):
+        if value in initializers:
+            return
+        node = producers.get(value)
+        if node is None or node.op_type not in PURE_CONSTANT:
+            raise ValueError(f"{name} is not produced by a constant-only branch")
+        if node.output[0] in selected:
+            return
+        if node.op_type == "Concat" and _attrs(node).get("axis") != 0:
+            raise ValueError(f"{name} uses a non-vector constant Concat")
+        for source in node.input:
+            if source:
+                visit(source)
+        selected.add(node.output[0])
+
+    visit(name)
+    nodes = [node for node in graph.node if node.output[0] in selected]
+    for node in nodes:
+        if node.op_type == "ConstantOfShape":
+            requested = np.asarray(_constant_value(model, node.input[0], TensorProto.INT64))
+            if (requested.dtype != np.int64 or requested.ndim != 1
+                    or requested.size > 4 or np.any(requested < 0)
+                    or math.prod(int(dim) for dim in requested) > 64):
+                raise ValueError("constant Pad shape branch requests too many elements")
+    used_initializers = [item for item in graph.initializer
+                         if item.name == name or any(item.name in node.input for node in nodes)]
+    mini = helper.make_model(
+        helper.make_graph(nodes, "constant_padding", [],
+                          [helper.make_tensor_value_info(name, element_type, [None])],
+                          initializer=used_initializers),
+        opset_imports=list(model.opset_import),
+    )
+    mini.ir_version = model.ir_version
+    onnx.checker.check_model(mini)
+    return ReferenceEvaluator(mini).run(None, {})[0]
+
+
+def _pad_spec(node, model):
+    attrs = _attrs(node)
+    if attrs.get("mode", b"constant") != b"constant" or set(attrs) - {"mode"}:
+        raise ValueError("Pad requires constant mode without other attributes")
+    if len(node.input) not in (2, 3) or not node.input[1]:
+        raise ValueError("Pad requires explicit pad widths")
+    pads = np.asarray(_constant_value(model, node.input[1], TensorProto.INT64))
+    if pads.dtype != np.int64 or pads.shape != (8,):
+        raise ValueError("Pad widths must be an eight-element int64 vector")
+    if (np.any(pads < 0) or np.any(pads > 4096)
+            or np.any(pads[[0, 1, 4, 5]] != 0)):
+        raise ValueError("Pad requires bounded nonnegative spatial-only widths")
+    if len(node.input) == 3 and node.input[2]:
+        value = np.asarray(_constant_value(model, node.input[2], TensorProto.FLOAT))
+        if value.dtype != np.float32 or value.size != 1 or not np.isfinite(value).all():
+            raise ValueError("Pad value must be a finite FP32 scalar")
+    return int(pads[2]), int(pads[3]), int(pads[6]), int(pads[7])
 
 
 def _spatial_op(node, initializers):
@@ -169,6 +236,7 @@ def analyze_local(model):
         step = steps[data_inputs[0]]
         spec = None
         resize_factor = None
+        pad_spec = None
         if op in {"Conv", "ConvTranspose", "MaxPool"}:
             if node.input[0] not in steps:
                 raise ValueError(f"node {index} ({op}) has no spatial input")
@@ -215,16 +283,21 @@ def analyze_local(model):
                 raise ValueError(f"node {index} Resize has fractional image phase")
             next_step = tuple(step[axis] // resize_factor[axis] for axis in range(2))
             alignment = [math.lcm(alignment[axis], step[axis]) for axis in range(2)]
+        elif op == "Pad":
+            if node.input[0] not in steps or len(data_inputs) != 1:
+                raise ValueError(f"node {index} Pad needs one spatial input")
+            pad_spec = _pad_spec(node, model)
+            next_step = step
         else:
             raise ValueError(f"node {index} ({op}) has no modeled local dependency")
         steps[node.output[0]] = next_step
-        node_specs.append((node, data_inputs, spec, resize_factor))
+        node_specs.append((node, data_inputs, spec, resize_factor, pad_spec))
     if steps.get(output) != (1, 1):
         raise ValueError("output must have the input spatial resolution")
 
     def dependency(axis, pixel):
         needed = {output: (pixel, pixel + 1)}
-        for node, data_inputs, spec, resize_factor in reversed(node_specs):
+        for node, data_inputs, spec, resize_factor, pad_spec in reversed(node_specs):
             interval = needed.pop(node.output[0], None)
             if interval is None:
                 continue
@@ -241,6 +314,9 @@ def analyze_local(model):
             elif resize_factor is not None:
                 factor = resize_factor[axis]
                 low, high = low // factor, (high-1) // factor + 1
+            elif pad_spec is not None:
+                before = pad_spec[axis]
+                low, high = low-before, high-before
             for name in data_inputs:
                 old = needed.get(name)
                 needed[name] = (min(old[0], low), max(old[1], high)) if old else (low, high)
@@ -305,6 +381,13 @@ def local_output_shape(model, height, width):
     inputs = [item for item in model.graph.input if item.name not in initializers]
     shapes = {inputs[0].name: (height, width)}
     for index, node in enumerate(model.graph.node):
+        if node.op_type == "Shape":
+            continue
+        if (node.op_type in SHAPE_ONLY
+                or (node.op_type == "Concat" and _attrs(node).get("axis") == 0)):
+            if any(name in shapes for name in node.input):
+                raise ValueError(f"node {index} applies shape-only logic to image values")
+            continue
         data = [shapes[name] for name in node.input if name in shapes]
         if not data or len(set(data)) != 1:
             raise ValueError(f"node {index} has inconsistent spatial inputs")
@@ -322,6 +405,9 @@ def local_output_shape(model, height, width):
                     raise ValueError(f"node {index} produces an empty spatial axis")
                 result.append(length)
             shape = tuple(result)
+        elif node.op_type == "Pad":
+            before_y, before_x, after_y, after_x = _pad_spec(node, model)
+            shape = (shape[0]+before_y+after_y, shape[1]+before_x+after_x)
         shapes[node.output[0]] = shape
     return shapes[model.graph.output[0].name]
 

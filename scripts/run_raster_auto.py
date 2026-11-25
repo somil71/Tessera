@@ -63,7 +63,7 @@ def model_family(model_path, model):
                      "BatchNormalization", "Add", "Sub", "Mul", "Div", "Concat",
                      "MaxPool", "ReduceMean", "Shape", "Reshape", "Transpose",
                      "MatMul", "Softmax", "Constant", "Gather", "Unsqueeze",
-                     "Slice", "Cast", "Resize"}
+                     "Slice", "Cast", "Resize", "ConstantOfShape", "Pad"}
     for index, node in enumerate(model.graph.node):
         if node.op_type not in supported_ops:
             raise ValueError(
