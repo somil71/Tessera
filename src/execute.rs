@@ -6,7 +6,7 @@ use std::{
 };
 
 use ort::{
-    session::Session,
+    session::{builder::SessionBuilder, Session},
     value::{Shape, Tensor},
 };
 use serde::Deserialize;
@@ -20,13 +20,23 @@ pub struct RunOptions<'a> {
     pub threads: usize,
 }
 
+fn session_builder(
+    environment: &ort::environment::Environment,
+    threads: usize,
+) -> ort::Result<SessionBuilder> {
+    // Arena growth and cached memory patterns can reserve more than a tile
+    // needs on later runs. Direct allocations avoid that extra reservation.
+    Ok(Session::builder(environment)?
+        .with_intra_threads(threads)?
+        .with_memory_pattern(false)?
+        .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])?)
+}
+
 pub fn full(model: &Path, options: &RunOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     let tensor = input_tensor(options)?;
     let environment = ort::init().build()?;
-    let mut session = Session::builder(&environment)?
-        .with_intra_threads(options.threads)?
-        .commit_from_file(model)?;
+    let mut session = session_builder(&environment, options.threads)?.commit_from_file(model)?;
     let loaded_ms = started.elapsed().as_millis();
     let loaded_memory = crate::memory::process_snapshot()?;
     let input_name = single_input_name(&session)?;
@@ -56,9 +66,7 @@ pub fn split(
     let started = Instant::now();
     let tensor = input_tensor(options)?;
     let environment = ort::init().build()?;
-    let mut head = Session::builder(&environment)?
-        .with_intra_threads(options.threads)?
-        .commit_from_file(head_path)?;
+    let mut head = session_builder(&environment, options.threads)?.commit_from_file(head_path)?;
     let head_load_ms = started.elapsed().as_millis();
     let head_loaded_memory = crate::memory::process_snapshot()?;
     let input_name = single_input_name(&head)?;
@@ -123,9 +131,7 @@ pub fn split(
     }
     let head_dropped_memory = crate::memory::process_snapshot()?;
     let tail_load_started = Instant::now();
-    let mut tail = Session::builder(&environment)?
-        .with_intra_threads(options.threads)?
-        .commit_from_file(tail_path)?;
+    let mut tail = session_builder(&environment, options.threads)?.commit_from_file(tail_path)?;
     let tail_load_ms = tail_load_started.elapsed().as_millis();
     let tail_loaded_memory = crate::memory::process_snapshot()?;
     let boundary_read_started = Instant::now();
@@ -334,12 +340,8 @@ pub fn serve_split(
         return Err("channels, height, width, and threads must be positive".into());
     }
     let environment = ort::init().build()?;
-    let mut head = Session::builder(&environment)?
-        .with_intra_threads(threads)?
-        .commit_from_file(head_path)?;
-    let mut tail = Session::builder(&environment)?
-        .with_intra_threads(threads)?
-        .commit_from_file(tail_path)?;
+    let mut head = session_builder(&environment, threads)?.commit_from_file(head_path)?;
+    let mut tail = session_builder(&environment, threads)?.commit_from_file(tail_path)?;
     let head_input = single_input_name(&head)?;
     let tail_names = tail
         .inputs()
@@ -457,12 +459,8 @@ pub fn serve_split_pipe(
         .and_then(|value| value.checked_mul(4))
         .ok_or("input dimensions overflow")?;
     let environment = ort::init().build()?;
-    let mut head = Session::builder(&environment)?
-        .with_intra_threads(threads)?
-        .commit_from_file(head_path)?;
-    let mut tail = Session::builder(&environment)?
-        .with_intra_threads(threads)?
-        .commit_from_file(tail_path)?;
+    let mut head = session_builder(&environment, threads)?.commit_from_file(head_path)?;
+    let mut tail = session_builder(&environment, threads)?.commit_from_file(tail_path)?;
     let head_input = single_input_name(&head)?;
     let tail_names = tail
         .inputs()

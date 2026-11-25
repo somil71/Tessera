@@ -15,3 +15,13 @@ On `sar3-512.tif`, fixed schedules with 512-pixel and 256-pixel tiles both match
 These runs test implementation behavior on an already exposed model. They do not replace the failed independent result, the frozen paired performance benchmark, or a new unseen model and machine configuration.
 
 The larger `sar3-1024.tif` automatic run also produced four 512-pixel tiles whose 2×1024×1024 logits matched a separate whole-image oracle exactly. The selected plan's nested Windows job reported `PeakJobMemoryUsed=2,058,858,496` bytes against the configured 1,073,741,824-byte cap, while 50 ms sampled private commitment peaked at 988,524,544 bytes and sampled working set at 829,452,288 bytes. No failed candidate was recorded. Under the [frozen memory evidence rule](evaluation-amendment-2.md), this run is **numerically correct but fails strict memory evidence**. The fact that it completed under an active job limit does not justify treating the raw counter as a pass.
+
+Disabling ONNX Runtime's CPU arena and memory-pattern cache for Rust inference sessions resolved that development case. With the same model, raster, 1 GiB cap, and two threads, a new automatic run selected four 512-pixel tiles and matched the whole-image logits exactly. Its nested and outer raw job peaks were both 730,681,344 bytes, its sampled private-commit peak was 730,644,480 bytes, and its total wall time was 41.84 seconds. The earlier run remains recorded above as a genuine failed memory-evidence observation. A fixed 128-pixel, 64-tile schedule also matched exactly with a 980,717,568-byte raw peak, but took 204.48 seconds. The 512-pixel fixed schedule with the arena disabled took 31.23 seconds and peaked at 729,636,864 bytes. These timings are single development runs, not paired baseline evidence.
+
+Reproduce the current automatic development run after generating the frozen model and raster artifacts per [amendment 6](evaluation-amendment-6.md):
+
+```powershell
+cargo build --locked
+.\.venv\Scripts\python.exe tests\performance\whole_image_oracle.py --model models\holdout\sar3-logits.onnx --input data\holdout\sar3\sar3-1024.tif --reference-output runs\holdout\sar3\oracle-1024.tif --report runs\holdout\sar3\oracle-1024.json --threads 2
+.\.venv\Scripts\python.exe scripts\run_raster_auto.py --model models\holdout\sar3-logits.onnx --input data\holdout\sar3\sar3-1024.tif --output runs\holdout\sar3\auto-1024.tif --reference-raster runs\holdout\sar3\oracle-1024.tif --memory-limit-mib 1024 --threads 2 --max-tile-size 512
+```
