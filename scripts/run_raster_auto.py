@@ -145,34 +145,36 @@ def candidate_cuts(model, family):
 
 
 def unique_probe_tiles(tiles, height, width, local_plan):
-    """Retain the largest tile for each halo-expanded probe shape."""
+    """Retain the largest tile for each actual maximum worker shape."""
     seen = set()
     selected = []
     for tile in tiles:
-        shape = (min(height, tile+2*local_plan.halo_y),
-                 min(width, tile+2*local_plan.halo_x))
+        shape = local_probe_shape(height, width, tile, local_plan)
         if shape not in seen:
             selected.append(tile)
             seen.add(shape)
     return selected
 
 
+def _axis_worker_sizes(length, tile, halo):
+    sizes = set()
+    for origin in range(0, length, tile):
+        core = min(tile, length-origin)
+        sizes.add(min(length, origin+core+halo)-max(0, origin-halo))
+    return sizes
+
+
+def local_probe_shape(height, width, tile, local_plan):
+    """Return a worker shape that really occurs on this raster and tile grid."""
+    return (max(_axis_worker_sizes(height, tile, local_plan.halo_y)),
+            max(_axis_worker_sizes(width, tile, local_plan.halo_x)))
+
+
 def worker_shape_count(height, width, tile, family, local_plan=None):
     if family not in {"local_unet", "local_graph"}:
         return 1
-    heights = set()
-    for row in range(0, height, tile):
-        core_h = min(tile, height-row)
-        top = max(0, row-local_plan.halo_y)
-        bottom = min(height, row+core_h+local_plan.halo_y)
-        heights.add(bottom-top)
-    widths = set()
-    for col in range(0, width, tile):
-        core_w = min(tile, width-col)
-        left = max(0, col-local_plan.halo_x)
-        right = min(width, col+core_w+local_plan.halo_x)
-        widths.add(right-left)
-    return len(heights)*len(widths)
+    return (len(_axis_worker_sizes(height, tile, local_plan.halo_y))
+            * len(_axis_worker_sizes(width, tile, local_plan.halo_x)))
 
 
 def profile_candidate(model, directory, family, tile, cut, channels, scores,
@@ -180,8 +182,7 @@ def profile_candidate(model, directory, family, tile, cut, channels, scores,
                       local_plan=None):
     cold_probe = (family == "local_graph" and
                   len(local_plan.operators) > 32)
-    shape = ((min(height, tile+2*local_plan.halo_y),
-              min(width, tile+2*local_plan.halo_x))
+    shape = (local_probe_shape(height, width, tile, local_plan)
              if family in {"local_unet", "local_graph"} else (tile, tile))
     candidate = dict(tile_size=tile, cut_after=cut, storage_mode=storage_mode,
                      probe_shape=list(shape),
@@ -469,7 +470,7 @@ def run(args):
                           best_ram["predicted_execution_seconds"] >=
                           DISK_PROBE_MIN_EXPECTED_RUNTIME_SECONDS):
                         disk_tiles = [tile for tile in tiles
-                                      if tile > best_ram["tile_size"]
+                                      if (args.explore_spill or tile > best_ram["tile_size"])
                                       and tile not in probed_disk_tiles]
                     else:
                         disk_tiles = []
@@ -585,7 +586,7 @@ def run(args):
         if reference is not None:
             report["numerical_error"] = compare_scores(reference, output)
         report.update(strategy=f"auto-{family}",
-                      selection_rule="For a one-tile pointwise or local image, attempt cut-0 RAM execution directly under the hard cap; on failure retain the attempt and calibrate. Otherwise profile RAM plans from large to small; stop after two smaller tile sizes each predict over 1.5 times the best runtime. For local graphs over 32 nodes, defer smaller tiles with an identical halo-expanded probe shape, sample structural cuts, try disk after each failed RAM probe, and execute the first feasible large-graph candidate to limit calibration cost. If sampled plans fail, search all remaining cuts and then restore deferred tile sizes. Profile larger spill tiles for smaller graphs when the fastest predicted RAM run is at least 10 s. Large local graphs use one cold timed inference per candidate so the probe measures the first-run cost and avoids repeated session commitment; other probes over one million pixels use one timed repetition after warmup. Rank measured plans by predicted runtime; within 10%, prefer fewer tiles",
+                      selection_rule="For a one-tile pointwise or local image, attempt cut-0 RAM execution directly under the hard cap; on failure retain the attempt and calibrate. Otherwise profile RAM plans from large to small; stop after two smaller tile sizes each predict over 1.5 times the best runtime. For local graphs over 32 nodes, defer smaller tiles with an identical maximum actual worker shape, sample structural cuts, try disk after each failed RAM probe, and execute the first feasible large-graph candidate to limit calibration cost. If sampled plans fail, search all remaining cuts and then restore deferred tile sizes. Profile larger spill tiles for smaller graphs when the fastest predicted RAM run is at least 10 s. Large local graphs use one cold timed inference per candidate so the probe measures the first-run cost and avoids repeated session commitment; other probes over one million pixels use one timed repetition after warmup. Rank measured plans by predicted runtime; within 10%, prefer fewer tiles",
                       ram_search_stopped_after_tile=ram_search_stopped_after,
                       cut_candidates=list(cuts),
                       equivalent_probe_tile_sizes_skipped=equivalent_tiles,

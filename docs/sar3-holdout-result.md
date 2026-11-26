@@ -18,6 +18,8 @@ The larger `sar3-1024.tif` automatic run also produced four 512-pixel tiles whos
 
 Disabling ONNX Runtime's CPU arena and memory-pattern cache for Rust inference sessions resolved that development case. With the same model, raster, 1 GiB cap, and two threads, a new automatic run selected four 512-pixel tiles and matched the whole-image logits exactly. Its nested and outer raw job peaks were both 730,681,344 bytes, its sampled private-commit peak was 730,644,480 bytes, and its total wall time was 41.84 seconds. The earlier run remains recorded above as a genuine failed memory-evidence observation. A fixed 128-pixel, 64-tile schedule also matched exactly with a 980,717,568-byte raw peak, but took 204.48 seconds. The 512-pixel fixed schedule with the arena disabled took 31.23 seconds and peaked at 729,636,864 bytes. These timings are single development runs, not paired baseline evidence.
 
+The planner previously tested a 1024² synthetic probe for this four-tile schedule even though each real halo-expanded worker input is 832². It now derives the largest worker shape from the actual tile grid. A repeat automatic run probed 832², matched the same oracle exactly, and reported a 729,477,120-byte raw job peak. Its 44.12-second total was slower than the previous 41.84-second run, so this single comparison supports a more faithful probe shape, not a performance improvement.
+
 Reproduce the current automatic development run after generating the frozen model and raster artifacts per [amendment 6](evaluation-amendment-6.md):
 
 ```powershell

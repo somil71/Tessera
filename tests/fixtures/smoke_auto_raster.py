@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
@@ -15,6 +16,14 @@ from rasterio.transform import from_origin
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from local_graph import LocalPlan
+from run_raster_auto import local_probe_shape, unique_probe_tiles
+
+large_halo = LocalPlan(320, 320, 32, 32, ())
+assert local_probe_shape(1024, 1024, 512, large_halo) == (832, 832)
+assert unique_probe_tiles([512, 256, 128], 1024, 1024, large_halo) == [512, 128]
+
 PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 RUNNER = ROOT / "scripts" / "run_raster_auto.py"
 OUT = ROOT / "runs" / "auto_raster_smoke"

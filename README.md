@@ -1,4 +1,6 @@
-# Raster Compiler
+# Tessera
+
+*Memory-bounded execution planning for large raster inference (formerly Raster Compiler).*
 
 Rust tooling for planning inference on images that exceed an available memory budget. The first target is CPU inference for ONNX vision models on large GeoTIFF rasters.
 
