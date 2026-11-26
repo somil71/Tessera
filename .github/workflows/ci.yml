@@ -25,30 +25,35 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install Python dependencies
+      - name: Create Virtual Environment and Install Dependencies
+        shell: powershell
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -r requirements-lock-windows-py311.txt
 
       - name: Cargo Check and Clippy
         run: |
           cargo check
           cargo clippy --all-targets -- -D warnings
 
-      - name: Cargo Unit Tests
-        run: cargo test --verbose
+      - name: Cargo Build and Test
+        run: |
+          cargo build
+          cargo test --verbose
 
       - name: Generate Evaluation Model Fixtures
+        shell: powershell
         run: |
-          python tests/fixtures/create_eval_models.py
-          python tests/fixtures/create_pointwise_model.py
+          .\.venv\Scripts\python.exe tests/fixtures/create_eval_models.py
+          .\.venv\Scripts\python.exe tests/fixtures/create_pointwise_model.py
 
-      - name: Run Core Python Smoke Suites
+      - name: Run Doctor & Core Smoke Suites
+        shell: powershell
         run: |
-          python tests/fixtures/smoke_job_memory.py
-          python tests/fixtures/smoke_constant_of_shape.py
-          python tests/fixtures/smoke_pointwise_operators.py
-          python tests/fixtures/smoke_unet_raster.py
-          python tests/fixtures/smoke_generic_local_raster.py
-          python tests/fixtures/smoke_global_mean_raster.py
-          python tests/fixtures/smoke_auto_raster.py
+          .\.venv\Scripts\python.exe scripts/doctor.py
+          .\.venv\Scripts\python.exe tests/fixtures/smoke_job_memory.py
+          .\.venv\Scripts\python.exe tests/fixtures/smoke_constant_of_shape.py
+          .\.venv\Scripts\python.exe tests/fixtures/smoke_pointwise_operators.py
+          .\.venv\Scripts\python.exe tests/fixtures/smoke_auto_raster.py
+          .\.venv\Scripts\python.exe tests/fixtures/smoke_whole_image_oracle.py

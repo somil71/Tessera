@@ -30,9 +30,25 @@ from job_memory import JobMemoryLimit
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXE = ROOT / "target" / "debug" / "raster-compiler.exe"
-DEFAULT_DLL = (
-    ROOT / ".venv" / "Lib" / "site-packages" / "onnxruntime" / "capi" / "onnxruntime.dll"
-)
+
+
+def _resolve_default_dll():
+    venv_dll = (
+        ROOT / ".venv" / "Lib" / "site-packages" / "onnxruntime" / "capi" / "onnxruntime.dll"
+    )
+    if venv_dll.exists():
+        return venv_dll
+    try:
+        import onnxruntime
+        pkg_dll = Path(onnxruntime.__file__).parent / "capi" / "onnxruntime.dll"
+        if pkg_dll.exists():
+            return pkg_dll
+    except Exception:
+        pass
+    return venv_dll
+
+
+DEFAULT_DLL = _resolve_default_dll()
 
 
 def configure_gdal_cache(memory_limit_mib):
