@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-windows:
+    name: Rust & Python Tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Cargo Check and Clippy
+        run: |
+          cargo check
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Cargo Unit Tests
+        run: cargo test --verbose
+
+      - name: Generate Evaluation Model Fixtures
+        run: |
+          python tests/fixtures/create_eval_models.py
+          python tests/fixtures/create_pointwise_model.py
+
+      - name: Run Core Python Smoke Suites
+        run: |
+          python tests/fixtures/smoke_job_memory.py
+          python tests/fixtures/smoke_constant_of_shape.py
+          python tests/fixtures/smoke_pointwise_operators.py
+          python tests/fixtures/smoke_unet_raster.py
+          python tests/fixtures/smoke_generic_local_raster.py
+          python tests/fixtures/smoke_global_mean_raster.py
+          python tests/fixtures/smoke_auto_raster.py

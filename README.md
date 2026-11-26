@@ -2,6 +2,12 @@
 
 *Memory-bounded execution planning for large raster inference (formerly Raster Compiler).*
 
+[![CI](https://github.com/somil71/Tessera/actions/workflows/ci.yml/badge.svg)](https://github.com/somil71/Tessera/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)](docs/windows-quickstart.md)
+[![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](Cargo.toml)
+
+
 Rust tooling for planning inference on images that exceed an available memory budget. The first target is CPU inference for ONNX vision models on large GeoTIFF rasters.
 
 When a model needs different normalization for each input band, use the [streaming preparation command](docs/preprocessing.md) before automatic inference.

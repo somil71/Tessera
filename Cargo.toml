@@ -2,7 +2,12 @@
 name = "raster-compiler"
 version = "0.1.0"
 edition = "2024"
-description = "Memory-bounded execution planning for large raster inference"
+description = "Tessera: Memory-bounded execution planning for large raster inference"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/somil71/Tessera"
+readme = "README.md"
+keywords = ["gis", "raster", "geospatial", "onnx", "inference"]
+categories = ["science::geo", "command-line-utilities"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
