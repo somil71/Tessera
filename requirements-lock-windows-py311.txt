@@ -13,5 +13,5 @@ onnxruntime==1.31.0
 packaging==26.4
 protobuf==7.36.2
 pyparsing==3.3.3
-rasterio==1.4.4
+rasterio==1.5.2
 typing_extensions==4.16.0
