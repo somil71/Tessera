@@ -7,7 +7,7 @@ click-plugins==1.1.1.2
 cligj==0.7.2
 flatbuffers==25.12.19
 ml_dtypes==0.7.0
-numpy==2.4.6
+numpy==2.5.5
 onnx==1.23.2
 onnxruntime==1.31.0
 packaging==26.4
